@@ -24,7 +24,7 @@ from six.moves import urllib
 
 def get_sig_xml_for_puid(puid):
     """Return the full PRONOM signature XML for the passed PUID."""
-    req = urllib.request.Request("http://www.nationalarchives.gov.uk/pronom/{}.xml".format(puid))
+    req = urllib.request.Request("https://www.nationalarchives.gov.uk/pronom/{}.xml".format(puid))
     response = urllib.request.urlopen(req)
     xml = response.read()
     return xml

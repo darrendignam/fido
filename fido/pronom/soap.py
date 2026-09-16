@@ -90,9 +90,9 @@ def _get_soap_ele_tree(soap_action):
 
 def _get_soap_response(soap_action, soap_string):
     try:
-        req = urllib.request.Request('http://{}/pronom/service.asmx'.format(PRONOM_HOST), data=soap_string)
+        req = urllib.request.Request('https://{}/pronom/service.asmx'.format(PRONOM_HOST), data=soap_string)
     except URLError:
-        print('There was a problem contacting the PRONOM service at http://{}/pronom/service.asmx.'.format(PRONOM_HOST))
+        print('There was a problem contacting the PRONOM service at https://{}/pronom/service.asmx.'.format(PRONOM_HOST))
         print('Please check your network connection and try again.')
         sys.exit(1)
     for key, value in HEADERS.items():
