@@ -83,7 +83,6 @@ class Fido:
 
     def __init__(self, quiet=False, bufsize=None, container_bufsize=None, printnomatch=None, printmatch=None, zip=False, nocontainer=False, handle_matches=None, conf_dir=CONFIG_DIR, format_files=None, containersignature_file=None):
         """Initialise a FIDO class instance."""
-        global defaults
         self.quiet = quiet
         self.bufsize = defaults['bufsize'] if bufsize is None else bufsize
         self.container_bufsize = defaults['container_bufsize'] if container_bufsize is None else container_bufsize
