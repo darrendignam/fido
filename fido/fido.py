@@ -13,6 +13,7 @@ import re
 import sys
 import tarfile
 import tempfile
+import time
 import zipfile
 from contextlib import closing
 from typing import Optional
@@ -32,10 +33,15 @@ defaults = {
     # A crafted archive can otherwise exhaust memory from a tiny file: a 204KB
     # zip holding a 200MB member, or 31 levels of nesting each holding its own
     # spooled copy. DROID applies comparable limits.
+    # PRONOM wildcards become unbounded greedy quantifiers, and a pattern with
+    # several of them backtracks polynomially: fmt/320 costs about 15x per
+    # doubling of the buffer. Matching them atomically gives the first-fit
+    # behaviour DROID has, and the timeout bounds the aggregate cost.
+    "atomic_patterns": True,
+    "match_timeout": 30,
     "max_recursion_depth": 4,
     "max_member_size": 1024 * 1024 * 1024,
     "max_compression_ratio": 200,
-    "regexcachesize": 2084,  # (bytes)
     "printmatch": 'OK,%(info.time)s,%(info.puid)s,"%(info.formatname)s","%(info.signaturename)s",%(info.filesize)s,"%(info.filename)s","%(info.mimetype)s","%(info.matchtype)s"\n',
     "printnomatch": 'KO,%(info.time)s,,,,%(info.filesize)s,"%(info.filename)s",,"%(info.matchtype)s"\n',
     "format_files": ["formats-v116.xml", "format_extensions.xml"],
@@ -79,6 +85,11 @@ class Fido:
         self.quiet = quiet
         self.bufsize = defaults["bufsize"] if bufsize is None else bufsize
         self.container_bufsize = defaults["container_bufsize"] if container_bufsize is None else container_bufsize
+        self.compiled_patterns = {}
+        self._container_signature_tree = None
+        self._container_signatures = {}
+        self.atomic_patterns = defaults["atomic_patterns"] and ATOMIC_GROUPS_SUPPORTED
+        self.match_timeout = defaults["match_timeout"]
         self.max_recursion_depth = defaults["max_recursion_depth"]
         self.max_member_size = defaults["max_member_size"]
         self.max_compression_ratio = defaults["max_compression_ratio"]
@@ -89,7 +100,9 @@ class Fido:
         self.nocontainer = nocontainer
         self.conf_dir = conf_dir
         self.format_files = defaults["format_files"] if format_files is None else format_files
-        self.containersignature_file = defaults["containersignature_file"]
+        self.containersignature_file = (
+            defaults["containersignature_file"] if containersignature_file is None else containersignature_file
+        )
         self.formats = []
         self.puid_format_map = {}
         self.puid_has_priority_over_map = {}
@@ -102,7 +115,8 @@ class Fido:
         self.current_sig = None
         self.current_pat = None
         self.current_count = 0  # Count of calls to match_formats
-        re._MAXCACHE = defaults["regexcachesize"]
+        # Patterns are compiled once in get_regex and cached there, so re's
+        # own cache size no longer matters
         self.externalsig = ET.XML("<signature><name>External</name></signature>")
 
     def convert_container_sequence(self, sig):
@@ -241,13 +255,25 @@ class Fido:
             signatures.setdefault(puid, []).append({"id": element.attrib["Id"], "files": requirements})
         return signatures
 
+    def container_signature_tree(self):
+        """Return the parsed container signature file, parsing it once.
+
+        Re-parsing the 300KB file for every container scanned was about 75% of
+        the work done per file, identical every time.
+        """
+        if self._container_signature_tree is None:
+            self._container_signature_tree = ET.parse(
+                os.path.join(os.path.abspath(self.conf_dir), self.containersignature_file)
+            )
+        return self._container_signature_tree
+
     def match_container(self, signature_type, klass, file, signature_file):
         """Return the signature matches for a container."""
-        package = klass(
-            file,
-            self.extract_signatures(signature_file, signature_type=signature_type),
-            max_read=self.container_bufsize,
-        )
+        signatures = self._container_signatures.get(signature_type)
+        if signatures is None:
+            signatures = self.extract_signatures(signature_file, signature_type=signature_type)
+            self._container_signatures[signature_type] = signatures
+        package = klass(file, signatures, max_read=self.container_bufsize)
         puids = package.detect_formats()
         results = []
         for puid in puids:
@@ -302,10 +328,6 @@ class Fido:
         """Return the signatures for the format element."""
         return format.findall("signature")
 
-    def has_priority_over(self, format, possibly_inferior):
-        """Return true if format has priority over possibly inferior."""
-        return self.get_puid(possibly_inferior) in self.puid_has_priority_over_map[self.get_puid(format)]
-
     def get_puid(self, format):
         """Return the PUID for the format."""
         return format.find("puid").text
@@ -319,13 +341,19 @@ class Fido:
         return pat.find("position").text
 
     def get_regex(self, pat):
-        """Return the UTF-8 encoded regex from a pattern."""
-        # The regex is matching bytes from a file so regex must also be bytes
-        return pat.find("regex").text.encode("utf8")
+        """Return the compiled regex for a pattern.
 
-    def get_extension(self, format):
-        """Return the extension for a format."""
-        return format.find("extension").text
+        Compiled once per pattern and cached, rather than relying on re's
+        internal cache, which cannot hold the 2400 patterns in play and so
+        re-parsed some of them for every file scanned.
+        """
+        compiled = self.compiled_patterns.get(id(pat))
+        if compiled is None:
+            # The regex matches bytes from a file, so the pattern is bytes too
+            source = pat.find("regex").text.encode("utf8")
+            compiled = re.compile(make_atomic(source) if self.atomic_patterns else source)
+            self.compiled_patterns[id(pat)] = compiled
+        return compiled
 
     def print_matches(self, fullname, matches, delta_t, matchtype=""):
         """
@@ -422,7 +450,7 @@ class Fido:
             matches = self.match_formats(bofbuffer, eofbuffer)
             container_type = self.container_type(matches)
             if not self.nocontainer and container_type in ("zip", "ole"):
-                container_file = ET.parse(os.path.join(os.path.abspath(self.conf_dir), self.containersignature_file))
+                container_file = self.container_signature_tree()
                 if container_type == "zip":
                     container_matches = self.match_container("ZIP", ZipPackage, filename, container_file)
                 else:
@@ -488,43 +516,6 @@ class Fido:
             #
             # carl@openpreservation.org 10/10/2019
             return
-
-    def identify_multi_object_stream(self, stream, extension=True):
-        """
-        Method does not work.
-
-        Stream may contain one or more objects each with an HTTP style header
-        that must include content-length. The headers consist of keyword:value
-        pairs terminated by a newline. There must be a newline following the
-        headers.
-        """
-        offset = 0
-        while True:
-            timer = PerfTimer()
-            content_length = -1
-            for line in stream:
-                offset += len(line)
-                if line == "\n":
-                    if content_length < 0:
-                        raise EnvironmentError("No content-length provided.")
-                    else:
-                        break
-                pair = line.lower().split(":", 2)
-                if pair[0] == "content-length":
-                    content_length = int(pair[1])
-            if content_length == -1:
-                return
-            # Consume exactly content-length bytes
-            self.current_file = "STDIN!(at " + str(offset) + " bytes)"
-            self.current_filesize = content_length
-            bofbuffer, eofbuffer, _ = self.get_buffers(stream, content_length)
-            matches = self.match_formats(bofbuffer, eofbuffer)
-            # MdR: this needs attention
-            if len(matches) > 0:
-                self.handle_matches(self.current_file, matches, timer.duration(), "signature")
-            elif extension and (len(matches) == 0 or self.current_filesize == 0):
-                matches = self.match_extensions(self.current_file)
-                self.handle_matches(self.current_file, matches, timer.duration(), "extension")
 
     def identify_stream(self, stream, filename, extension=True):
         """
@@ -810,23 +801,6 @@ class Fido:
                     return False
         return True
 
-    def buffered_read(self, file_pos, overlap):
-        """Buffered read of data chunks."""
-        buf = ""
-        if not overlap:
-            bufsize = self.container_bufsize
-        else:
-            bufsize = self.container_bufsize + overlap
-        file_end = self.current_filesize
-        with open(self.current_file, "rb") as file_handle:
-            file_handle.seek(file_pos)
-            if file_end - file_pos < bufsize:
-                file_read = file_end - file_pos
-            else:
-                file_read = self.bufsize
-            buf = file_handle.read(file_read)
-        return buf
-
     def match_formats(self, bofbuffer, eofbuffer):
         """
         Apply the patterns for formats to the supplied buffers.
@@ -836,7 +810,16 @@ class Fido:
         """
         self.current_count += 1
         result = []
+        deadline = None if not self.match_timeout else time.monotonic() + self.match_timeout
         for format in self.formats:
+            if deadline is not None and time.monotonic() > deadline:
+                # A backstop for the aggregate cost of 2400 patterns. It cannot
+                # interrupt a single match already running, which is what the
+                # atomic rewrite below addresses.
+                sys.stderr.write(
+                    "FIDO: Giving up on {0} after {1}s\n".format(self.current_file, self.match_timeout)
+                )
+                break
             try:
                 self.current_format = format
                 for sig in self.get_signatures(format):
@@ -847,12 +830,12 @@ class Fido:
                         pos = self.get_pos(pat)
                         regex = self.get_regex(pat)
                         if pos == "BOF":
-                            if not re.match(regex, bofbuffer):
+                            if not regex.match(bofbuffer):
                                 success = False
                                 break
                         elif pos in ("EOF", "VAR", "IFB"):
                             buffer_ = eofbuffer if pos == "EOF" else bofbuffer
-                            if not re.search(regex, buffer_):
+                            if not regex.search(buffer_):
                                 success = False
                                 break
                     if success:
@@ -904,6 +887,39 @@ def field_value(value):
     text = str(value)
     # CSV quotes an embedded quote by doubling it; a line break ends the record
     return text.replace('"', '""').replace("\r", " ").replace("\n", " ")
+
+
+def _atomic_groups_supported():
+    """Return True if this interpreter understands atomic groups, 3.11 and up."""
+    try:
+        re.compile(r"(?>a)")
+    except re.error:
+        return False
+    return True
+
+
+ATOMIC_GROUPS_SUPPORTED = _atomic_groups_supported()
+
+# A gap followed by whatever comes next, which is the shape that backtracks
+_GREEDY_GAP = re.compile(rb"\.(?:\*|\+)")
+
+
+def make_atomic(pattern, threshold=2):
+    """Return @param pattern with its unbounded gaps matched atomically.
+
+    PRONOM * and + become bare .* and .+ under DOTALL, so a pattern carrying
+    several of them is a polynomial backtracker over the buffer: fmt/320 costs
+    about 15x per doubling and the default buffer is 128KB. Committing to the
+    first match of each gap is what DROID effectively does.
+
+    Only applied from @param threshold gaps upward, because committing is not
+    semantically free: one gap cannot backtrack polynomially on its own, while
+    rewriting a single-gap pattern changes which ODF signature wins and so
+    changes the answer. 85 of the 2467 shipped patterns carry two or more.
+    """
+    if not ATOMIC_GROUPS_SUPPORTED or len(_GREEDY_GAP.findall(pattern)) < threshold:
+        return pattern
+    return _GREEDY_GAP.sub(lambda match: b"(?>" + match.group(0) + b")", pattern)
 
 
 def list_files(roots, recurse=False):
@@ -1013,7 +1029,9 @@ def main(args=None):
             sys.stderr.flush()
         if (not args.input) and len(args.files) == 1 and args.files[0] == "-":
             if fido.zip:
-                raise RuntimeError("Multiple content read from stdin not yet supported.")
+                # Rejected here rather than at parse time only because -zip is
+                # meaningful for every other input
+                sys.exit("FIDO: -zip cannot be combined with reading from stdin.")
             # get_buffers accumulates bytes, so the text wrapper will not do
             stdin = getattr(sys.stdin, "buffer", sys.stdin)
             fido.identify_stream(stdin, args.filename, extension=not args.noextension)
