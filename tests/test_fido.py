@@ -744,3 +744,57 @@ def test_process_format_element_replaces_a_childless_element(monkeypatch):
 
     assert fido.formats == [replacement]
     assert fido.puid_format_map["fmt/1"] is replacement
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    (
+        ('a",INJECTED,x', 'a"",INJECTED,x'),
+        ("line\nbreak", "line break"),
+        ("carriage\rreturn", "carriage return"),
+        (None, ""),
+        ("plain.txt", "plain.txt"),
+    ),
+)
+def test_field_value_cannot_break_out_of_a_record(raw, expected):
+    """A filename is attacker controlled and the templates quote without escaping."""
+    assert fido_mod.field_value(raw) == expected
+
+
+def test_csv_output_round_trips_an_awkward_filename(monkeypatch, capsys):
+    """The emitted row must parse back to nine fields with the name intact."""
+    fido = _make_fido(monkeypatch)
+    fido.current_filesize = 10
+    fmt = _format_element("fmt/1")
+    XET.SubElement(fmt, "name").text = 'Weird "quoted" name'
+    XET.SubElement(fmt, "mime").text = "application/test"
+
+    fido.print_matches('odd",name\n.bin', [(fmt, "sig")], delta_t=0.0, matchtype="signature")
+
+    rows = list(csv.reader(io.StringIO(capsys.readouterr().out)))
+    assert len(rows) == 1
+    assert len(rows[0]) == 9
+    assert rows[0][6] == 'odd",name .bin'
+
+
+def test_missing_mime_element_is_empty_not_the_string_none(monkeypatch, capsys):
+    fido = _make_fido(monkeypatch)
+    fido.current_filesize = 10
+    fmt = _format_element("fmt/1")
+    XET.SubElement(fmt, "name").text = "Test"
+
+    fido.print_matches("f.bin", [(fmt, "sig")], delta_t=0.0, matchtype="signature")
+
+    assert "None" not in capsys.readouterr().out
+
+
+def test_list_files_reports_a_path_that_is_neither_file_nor_directory(capsys):
+    """os.walk yields nothing for these, so a typo looked like a clean empty run."""
+    assert list(fido_mod.list_files(["/does/not/exist.txt"])) == []
+    assert "Not a file or directory" in capsys.readouterr().err
+
+
+def test_list_files_skips_blank_lines(tmp_path, capsys):
+    """A blank line normalised to "." and silently walked the working directory."""
+    assert list(fido_mod.list_files(["", "\n"])) == []
+    assert capsys.readouterr().err == ""
