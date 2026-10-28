@@ -159,45 +159,77 @@ class Fido:
 
     def extract_signatures(self, doc, signature_type="ZIP"):
         """
-        Given an XML container signature file, returns a dictionary of signatures.
+        Given an XML container signature file, return the signatures by PUID.
 
-        The format of the dictionary is:
+        The format of the returned dictionary is:
 
         {
-            path_to_file_inside_zip: {puid: [signatures]}
+            puid: [
+                {
+                    "id": container_signature_id,
+                    "files": [
+                        {"path": path_inside_container, "sequences": [sequence, ...]},
+                        ...
+                    ],
+                },
+                ...
+            ]
         }
+
+        A PUID matches when any one of its signatures matches, and a signature
+        matches only when every file it names is present and every sequence in
+        each of those files is found. Previously only the first file and its
+        first sequence were kept, so a signature that distinguishes versions by
+        a second file matched every version at once.
         """
         root = doc.getroot()
         format_mappings = root.find("FileFormatMappings")
 
-        def get_puid(doc, element_id):
-            return format_mappings.find('FileFormatMapping[@signatureId="{}"]'.format(element_id)).attrib["Puid"]
+        def get_puid(element_id):
+            mapping = format_mappings.find('FileFormatMapping[@signatureId="{}"]'.format(element_id))
+            return None if mapping is None else mapping.attrib["Puid"]
 
-        def format_signature_attributes(element):
-            return {
-                "path": element.findtext("Files/File/Path"),
-                "id": element.attrib["Id"],
-                "signature": self.convert_container_sequence(
-                    element.findtext(
-                        "Files/File/BinarySignatures/InternalSignatureCollection/InternalSignature/ByteSequence/SubSequence/Sequence"
-                    )
-                ),
-            }
+        def file_requirement(file_element):
+            sequences = []
+            for sub_sequence in file_element.iterfind(
+                "BinarySignatures/InternalSignatureCollection/InternalSignature/ByteSequence/SubSequence"
+            ):
+                sequence = self.convert_container_sequence(sub_sequence.findtext("Sequence"))
+                if sequence is None:
+                    continue
+                max_offset = sub_sequence.attrib.get("SubSeqMaxOffset")
+                sequences.append(
+                    {
+                        "sequence": sequence,
+                        # Only a first subsequence counted from the start of the
+                        # file has a meaningful maximum offset
+                        "max_offset": (
+                            int(max_offset)
+                            if max_offset is not None and sub_sequence.attrib.get("Position") == "1"
+                            else None
+                        ),
+                    }
+                )
+            return {"path": file_element.findtext("Path"), "sequences": sequences}
 
-        elements = root.findall('ContainerSignatures/ContainerSignature[@ContainerType="{}"]'.format(signature_type))
         signatures = {}
-        for el in elements:
-            if el.find("Files/File/BinarySignatures") is None:
+        for element in root.iterfind(
+            'ContainerSignatures/ContainerSignature[@ContainerType="{}"]'.format(signature_type)
+        ):
+            puid = get_puid(element.attrib["Id"])
+            if puid is None:
                 continue
-
-            puid = get_puid(doc, el.attrib["Id"])
-            signature = format_signature_attributes(el)
-            path = signature["path"]
-            if path not in signatures:
-                signatures[path] = {}
-            if puid not in signatures[path]:
-                signatures[path][puid] = []
-            signatures[path][puid].append(format_signature_attributes(el))
+            files = [
+                requirement
+                for requirement in (file_element for file_element in element.iterfind("Files/File"))
+                if requirement.find("BinarySignatures") is not None
+            ]
+            requirements = [file_requirement(file_element) for file_element in files]
+            # A requirement with no usable sequence cannot be tested, so a
+            # signature carrying one would match on its remaining files alone
+            if not requirements or any(not item["sequences"] or not item["path"] for item in requirements):
+                continue
+            signatures.setdefault(puid, []).append({"id": element.attrib["Id"], "files": requirements})
         return signatures
 
     def match_container(self, signature_type, klass, file, signature_file):
@@ -210,9 +242,17 @@ class Fido:
         puids = package.detect_formats()
         results = []
         for puid in puids:
-            format = self.puid_format_map[puid]
-            signature = format.findtext("name")
-            results.append((format, signature))
+            format = self.puid_format_map.get(puid)
+            if format is None:
+                # Reachable whenever the container signature file is newer than
+                # the format file, for instance after a partial -sigs update
+                sys.stderr.write("FIDO: container signature names unknown PUID {}\n".format(puid))
+                continue
+            results.append((format, format.findtext("name")))
+        # Container matches skipped priority resolution, unlike the signature
+        # and extension paths, so a file was reported as several mutually
+        # exclusive formats at once
+        results = [match for match in results if self.as_good_as_any(match[0], results)]
         return results
 
     def load_fido_xml(self, file):
@@ -566,41 +606,58 @@ class Fido:
         bytes_to_read = self.bufsize if length is None else min(length, self.bufsize)
         bofbuffer = self.blocking_read(stream, bytes_to_read)
         bytes_read = len(bofbuffer)
-        if length is None:
-            # A stream with unknown length; have to keep two buffers around
-            prevbuffer = bofbuffer
-            while True:
-                buffer = self.blocking_read(stream, self.bufsize)
-                bytes_read += len(buffer)
-                if len(buffer) == self.bufsize:
-                    prevbuffer = buffer
-                else:
-                    eofbuffer = prevbuffer if len(buffer) == 0 else prevbuffer[-(self.bufsize - len(buffer)) :] + buffer
-                    break
+
+        if length is not None and seekable and bytes_read == bytes_to_read:
+            stream.seek(0, os.SEEK_END)
+            # Never read past the declared length, which bounds a member inside
+            # a larger stream, but do not trust it to be reached either: a file
+            # can shrink between stat and read, and a zip header can lie
+            end_of_data = min(length, stream.tell())
+            stream.seek(max(0, end_of_data - self.bufsize))
+            eofbuffer = self.blocking_read(stream, self.bufsize)
             return bofbuffer, eofbuffer, bytes_read
-        bytes_unread = length - len(bofbuffer)
-        if bytes_unread == 0:
-            eofbuffer = bofbuffer
-        elif bytes_unread < self.bufsize:
-            # The buffs overlap
-            eofbuffer = bofbuffer[bytes_unread:] + self.blocking_read(stream, bytes_unread)
-        elif bytes_unread == self.bufsize:
-            eofbuffer = self.blocking_read(stream, self.bufsize)
-        elif seekable:  # easy case when we can just seek!
-            stream.seek(length - self.bufsize)
-            eofbuffer = self.blocking_read(stream, self.bufsize)
-        else:
-            # We have more to read and know how much.
-            # n*bufsize + r = length
-            (n, r) = divmod(bytes_unread, self.bufsize)
-            # skip n-1*bufsize bytes
-            for unused_i in range(1, n):
-                self.blocking_read(stream, self.bufsize)
-            # skip r bytes
-            self.blocking_read(stream, r)
-            # and read the remaining bufsize bytes into the eofbuffer
-            eofbuffer = self.blocking_read(stream, self.bufsize)
-        return bofbuffer, eofbuffer, bytes_to_read
+
+        # Roll a window forward to the end of the data, stopping at the declared
+        # length when there is one. Correct whether or not that length is
+        # reached, where the old skip arithmetic produced an empty or truncated
+        # tail and EOF signatures then silently could not match.
+        remaining = None if length is None else max(0, length - bytes_read)
+        prevbuffer = bofbuffer
+        while True:
+            if remaining == 0:
+                eofbuffer = prevbuffer[-self.bufsize:]
+                break
+            chunk = self.bufsize if remaining is None else min(self.bufsize, remaining)
+            buffer = self.blocking_read(stream, chunk)
+            bytes_read += len(buffer)
+            if remaining is not None:
+                remaining -= len(buffer)
+            if len(buffer) == self.bufsize:
+                prevbuffer = buffer
+            else:
+                if len(buffer) == 0:
+                    eofbuffer = prevbuffer[-self.bufsize:]
+                else:
+                    eofbuffer = (prevbuffer + buffer)[-self.bufsize:]
+                break
+        return bofbuffer, eofbuffer, bytes_read
+
+        # Not seekable, so roll a window forward to the real end of the stream.
+        # This is correct whether or not a length was declared, where the
+        # length-driven skip arithmetic silently produced the wrong tail.
+        prevbuffer = bofbuffer
+        while True:
+            buffer = self.blocking_read(stream, self.bufsize)
+            bytes_read += len(buffer)
+            if len(buffer) == self.bufsize:
+                prevbuffer = buffer
+            else:
+                if len(buffer) == 0:
+                    eofbuffer = prevbuffer
+                else:
+                    eofbuffer = prevbuffer[-(self.bufsize - len(buffer)):] + buffer
+                break
+        return bofbuffer, eofbuffer, bytes_read
 
     def walk_zip(self, filename, fileobj=None, extension=True):
         """
@@ -632,10 +689,16 @@ class Fido:
                     else:
                         self.handle_matches(item_name, [], timer.duration(), "fail")
                     if self.container_type(matches):
-                        target = tempfile.SpooledTemporaryFile(prefix="Fido")
-                        with zipstream.open(item) as source:
-                            self.copy_stream(source, target)
-                            # target.seek(0)
+                        # max_size defaults to 0, which never rolls over, so a
+                        # large nested member stayed wholly in memory
+                        with tempfile.SpooledTemporaryFile(
+                            max_size=self.container_bufsize, prefix="Fido"
+                        ) as target:
+                            with zipstream.open(item) as source:
+                                self.copy_stream(source, target)
+                            # tarfile takes tell() as the archive start, so
+                            # without this a tar inside a zip yielded no members
+                            target.seek(0)
                             self.identify_contents(
                                 item_name,
                                 target,
@@ -665,7 +728,15 @@ class Fido:
                         self.current_filesize = item.size
                         bofbuffer, eofbuffer, _ = self.get_buffers(f, item.size)
                         matches = self.match_formats(bofbuffer, eofbuffer)
-                        self.handle_matches(tar_item_name, matches, timer.duration())
+                        # Mirrors walk_zip: a tar member used to get no
+                        # extension fallback and an empty matchtype column
+                        if len(matches) > 0 and self.current_filesize > 0:
+                            self.handle_matches(tar_item_name, matches, timer.duration(), "signature")
+                        elif extension and (len(matches) == 0 or self.current_filesize == 0):
+                            matches = self.match_extensions(tar_item_name)
+                            self.handle_matches(tar_item_name, matches, timer.duration(), "extension")
+                        else:
+                            self.handle_matches(tar_item_name, [], timer.duration(), "fail")
                         if self.container_type(matches):
                             f.seek(0)
                             self.identify_contents(
@@ -674,8 +745,8 @@ class Fido:
                                 self.container_type(matches),
                                 extension=extension,
                             )
-        except tarfile.TarError:
-            sys.stderr.write("FIDO: Error: TarError {0}\n".format(filename))
+        except (tarfile.TarError, OSError) as err:
+            sys.stderr.write("FIDO: Error: TarError {0}: {1}\n".format(filename, err))
 
     def as_good_as_any(self, f1, match_list):
         """

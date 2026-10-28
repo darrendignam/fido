@@ -798,3 +798,42 @@ def test_list_files_skips_blank_lines(tmp_path, capsys):
     """A blank line normalised to "." and silently walked the working directory."""
     assert list(fido_mod.list_files(["", "\n"])) == []
     assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize("declared", (20, 12, 10, None))
+def test_eof_buffer_comes_from_the_bytes_actually_read(monkeypatch, declared):
+    """A declared length that overstates the data gave an empty or short tail.
+
+    A file can shrink between stat and read, and a zip entry's header can lie,
+    and the result was that EOF signatures silently could not match.
+    """
+    fido = _make_fido(monkeypatch)
+    fido.bufsize = 8
+    data = b"0123456789"
+
+    _bof, eof, _read = fido.get_buffers(io.BytesIO(data), declared)
+
+    assert eof == data[-8:]
+
+
+@pytest.mark.parametrize("declared", (12, 16, 20))
+def test_declared_length_still_bounds_a_member_inside_a_longer_stream(monkeypatch, declared):
+    """The length also bounds a container member, so it must not be read past."""
+    fido = _make_fido(monkeypatch)
+    fido.bufsize = 8
+    data = b"0123456789abcdefghij"
+
+    _bof, eof, _read = fido.get_buffers(io.BytesIO(data), declared)
+
+    assert eof == data[declared - 8:declared]
+
+
+def test_seekable_eof_buffer_handles_both_cases(monkeypatch):
+    fido = _make_fido(monkeypatch)
+    fido.bufsize = 8
+
+    _bof, overstated, _ = fido.get_buffers(io.BytesIO(b"0123456789"), 20, seekable=True)
+    assert overstated == b"23456789"
+
+    _bof, bounded, _ = fido.get_buffers(io.BytesIO(b"0123456789abcdefghij"), 12, seekable=True)
+    assert bounded == b"456789ab"
