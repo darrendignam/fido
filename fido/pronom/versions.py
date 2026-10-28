@@ -17,7 +17,6 @@ FIDO uses the UK National Archives (TNA) PRONOM File Format and Container descri
 PRONOM is available from http://www.nationalarchives.gov.uk/pronom/
 """
 
-import importlib.resources
 import os
 import re
 import sys
@@ -127,9 +126,15 @@ def get_local_versions(config_dir=CONFIG_DIR):
     return LocalVersions(os.path.join(config_dir, "versions.xml"))
 
 
-def sig_file_actions(sig_act):
-    """Process signature file update actions."""
-    versions = get_local_versions()
+def sig_file_actions(sig_act, config_dir=CONFIG_DIR):
+    """Process signature file update actions.
+
+    @param config_dir is where versions.xml is read from and where signature
+    files are installed. Without it every -sigs action read the packaged
+    versions.xml regardless of -confdir, so an alternative signature service
+    could not be tested without editing the installed package.
+    """
+    versions = get_local_versions(config_dir)
     sig_vers = versions.pronom_version
 
     # Get update URL, add trailing slash if missing
@@ -143,10 +148,10 @@ def sig_file_actions(sig_act):
         _list_available_versions(update_url)
     elif sig_act in ["check", "update"]:
         # Check or/and update signature file to latest
-        _check_update_signatures(sig_vers, update_url, versions, sig_act == "update")
+        _check_update_signatures(sig_vers, update_url, versions, sig_act == "update", config_dir)
     else:
         # Download a specific version of the signature file
-        _download_sig_version(sig_act, update_url, versions)
+        _download_sig_version(sig_act, update_url, versions, config_dir)
     sys.stdout.flush()
     sys.exit(0)
 
@@ -160,18 +165,18 @@ def _list_available_versions(update_url):
         sys.stdout.write("{}\n".format(child.get("version")))
 
 
-def _check_update_signatures(sig_vers, update_url, versions, is_update=False):
+def _check_update_signatures(sig_vers, update_url, versions, is_update=False, config_dir=CONFIG_DIR):
     is_new, latest = _version_check(sig_vers, update_url)
     if is_new:
         sys.stdout.write("Updated signatures v{} are available, current version is v{}\n".format(latest, sig_vers))
         if is_update:
-            _output_details(latest, update_url, versions)
+            _output_details(latest, update_url, versions, config_dir)
     else:
         sys.stdout.write("Your signature files are up to date, current version is v{}\n".format(sig_vers))
     sys.exit(0)
 
 
-def _download_sig_version(sig_act, update_url, versions):
+def _download_sig_version(sig_act, update_url, versions, config_dir=CONFIG_DIR):
     sys.stdout.write("Downloading signature files for version {}\n".format(sig_act))
     match = re.search(r"^v?(\d+)$", sig_act, re.IGNORECASE)
 
@@ -183,7 +188,7 @@ def _download_sig_version(sig_act, update_url, versions):
     resp = requests.get(update_url + "format/" + ver + "/", timeout=HTTP_TIMEOUT)
     if resp.status_code != 200:
         sys.exit("No signature files found for {}, REST status {}".format(sig_act, resp.status_code))
-    _output_details(re.search(r"\d+|$", ver).group(), update_url, versions)  # noqa: W605
+    _output_details(re.search(r"\d+|$", ver).group(), update_url, versions, config_dir)  # noqa: W605
 
 
 def _get_version(ver_string):
@@ -198,11 +203,11 @@ def _get_version(ver_string):
     return match.group(1)
 
 
-def _output_details(version, update_url, versions):
+def _output_details(version, update_url, versions, config_dir=CONFIG_DIR):
     sys.stdout.write("Updating signature file to {}.\n".format(version))
-    _write_sigs(version, update_url, "fido", "formats-v{}.xml")
-    _write_sigs(version, update_url, "droid", "DROID_SignatureFile-v{}.xml")
-    _write_sigs(version, update_url, "pronom", "pronom-xml-v{}.zip")
+    _write_sigs(version, update_url, "fido", "formats-v{}.xml", config_dir)
+    _write_sigs(version, update_url, "droid", "DROID_SignatureFile-v{}.xml", config_dir)
+    _write_sigs(version, update_url, "pronom", "pronom-xml-v{}.zip", config_dir)
     versions.pronom_version = "{}".format(version)
     versions.pronom_signature = "formats-v{}.xml".format(version)
     versions.write()
@@ -217,8 +222,10 @@ def _version_check(sig_ver, update_url):
     return int(latest) > int(sig_ver), latest
 
 
-def _write_sigs(latest, update_url, type, name_template):
-    sig_out = str(importlib.resources.files("fido").joinpath("conf", name_template.format(latest)))
+def _write_sigs(latest, update_url, type, name_template, config_dir=CONFIG_DIR):
+    # Installed alongside the versions.xml being updated, rather than always
+    # inside the package, so that -confdir selects both
+    sig_out = os.path.join(config_dir, name_template.format(latest))
     if os.path.exists(sig_out) and _is_valid_signature_file(sig_out, type):
         return
     resp = requests.get(update_url + "format/{0}/{1}/".format(latest, type), timeout=HTTP_TIMEOUT)
