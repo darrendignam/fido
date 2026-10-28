@@ -12,19 +12,23 @@ ORDINARY = frozenset(
     " \"#%&',-/0123456789:;=@ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz~"
 )
 SPECIAL = "$()*+.?![]^\\{|}"  # Before: '$*+.?![]^\\{|}'
-HEX = "0123456789abcdef"
 
 
 def escape_char(c):
     """Add appropriate escape sequence to passed character c."""
-    if c in "\n":
+    if c == "\n":
         return "\\n"
     if c == "\r":
         return "\\r"
     if c in SPECIAL:
         return "\\" + c
-    (high, low) = divmod(ord(c), 16)
-    return "\\x" + HEX[high] + HEX[low]
+    code_point = ord(c)
+    if code_point < 256:
+        return "\\x{:02x}".format(code_point)
+    # A literal above U+00FF has no single-byte escape. Emitting its UTF-8
+    # bytes keeps the pattern matching what a UTF-8 source file holds, where
+    # indexing a 16 character table used to raise IndexError.
+    return "".join("\\x{:02x}".format(byte) for byte in c.encode("utf-8"))
 
 
 def escape(string):

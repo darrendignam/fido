@@ -48,3 +48,20 @@ def test_parse_files_and_input_invalid():
     arg_string = "-q -zip -input files.txt file1.ext file2.ext"
     with pytest.raises(SystemExit):
         parse_cli_args(arg_string.split(), defaults)
+
+
+@pytest.mark.parametrize("value", ("0", "-1", "512", "abc", ""))
+def test_buffer_sizes_below_the_floor_are_rejected(value):
+    """A zero or negative buffer silently misidentified every file.
+
+    -bufsize 0 reported a PDF as Rich Text Format, with matchtype signature.
+    """
+    with pytest.raises(SystemExit):
+        parse_cli_args(["-bufsize", value, "file.bin"], defaults)
+
+
+@pytest.mark.parametrize("argument", ("-bufsize", "-container_bufsize"))
+def test_buffer_sizes_above_the_floor_are_accepted(argument):
+    args = parse_cli_args([argument, "4096", "file.bin"], defaults)
+
+    assert getattr(args, argument.lstrip("-")) == 4096

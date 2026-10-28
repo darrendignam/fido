@@ -202,7 +202,12 @@ class Fido:
 
     def match_container(self, signature_type, klass, file, signature_file):
         """Return the signature matches for a container."""
-        puids = klass(file, self.extract_signatures(signature_file, signature_type=signature_type)).detect_formats()
+        package = klass(
+            file,
+            self.extract_signatures(signature_file, signature_type=signature_type),
+            max_read=self.container_bufsize,
+        )
+        puids = package.detect_formats()
         results = []
         for puid in puids:
             format = self.puid_format_map[puid]
@@ -231,8 +236,8 @@ class Fido:
         # TODO: Handle empty regexes properly; perhaps remove from the format list
         puid = self.get_puid(element)
         # Handle over-writes in multiple file loads
-        existing = self.puid_format_map.get(puid, False)
-        if existing:
+        existing = self.puid_format_map.get(puid)
+        if existing is not None:
             # Already have one, so replace old with new!
             self.formats[self.formats.index(existing)] = element
         else:
@@ -629,10 +634,8 @@ class Fido:
                                 self.container_type(matches),
                                 extension=extension,
                             )
-        except IOError:
-            sys.stderr.write("FIDO: ZipError {0}\n".format(filename))
-        except zipfile.BadZipfile:
-            sys.stderr.write("FIDO: ZipError {0}\n".format(filename))
+        except (IOError, OSError, zipfile.BadZipfile) as err:
+            sys.stderr.write("FIDO: ZipError {0}: {1}\n".format(filename, err))
 
     def walk_tar(self, filename, fileobj, extension=True):
         """
@@ -710,42 +713,35 @@ class Fido:
         for format in self.formats:
             try:
                 self.current_format = format
-                if self.as_good_as_any(format, result):
-                    for sig in self.get_signatures(format):
-                        self.current_sig = sig
-                        success = True
-                        for pat in self.get_patterns(sig):
-                            self.current_pat = pat
-                            pos = self.get_pos(pat)
-                            regex = self.get_regex(pat)
-                            # print 'trying ', regex
-                            if pos == "BOF":
-                                if not re.match(regex, bofbuffer):
-                                    success = False
-                                    break
-                            elif pos == "EOF":
-                                if not re.search(regex, eofbuffer):
-                                    success = False
-                                    break
-                            elif pos == "VAR":
-                                if not re.search(regex, bofbuffer):
-                                    success = False
-                                    break
-                            elif pos == "IFB":
-                                if not re.search(regex, bofbuffer):
-                                    success = False
-                                    break
-                        if success:
-                            result.append((format, sig.findtext("name")))
-            except Exception as e:
-                sys.stderr.write(str(e) + "\n")
+                for sig in self.get_signatures(format):
+                    self.current_sig = sig
+                    success = True
+                    for pat in self.get_patterns(sig):
+                        self.current_pat = pat
+                        pos = self.get_pos(pat)
+                        regex = self.get_regex(pat)
+                        if pos == "BOF":
+                            if not re.match(regex, bofbuffer):
+                                success = False
+                                break
+                        elif pos in ("EOF", "VAR", "IFB"):
+                            buffer_ = eofbuffer if pos == "EOF" else bofbuffer
+                            if not re.search(regex, buffer_):
+                                success = False
+                                break
+                    if success:
+                        result.append((format, sig.findtext("name")))
+            except re.error as err:
+                # A pattern that cannot compile means that format can never be
+                # identified, so name it rather than emitting a bare message
+                sys.stderr.write("FIDO: invalid signature regex for {}: {}\n".format(self.get_puid(format), err))
                 continue
-            # TODO: MdR: needs some <3
-            # print "Unexpected error:", sys.exc_info()[0], e
-            # sys.stdout.write('***', self.get_puid(format), regex)
 
-        result = [match for match in result if self.as_good_as_any(match[0], result)]
-        return result
+        # Priority is resolved once, over the complete match set. Filtering
+        # during collection as well made the outcome depend on the order of
+        # self.formats, because a format dropped then was missing from the list
+        # this pass reasons over.
+        return [match for match in result if self.as_good_as_any(match[0], result)]
 
     def match_extensions(self, filename):
         """Return the list of (format, self.externalsig) for every format whose extension matches the filename."""
@@ -787,6 +783,13 @@ def list_files(roots, recurse=False):
 
 def main(args=None):
     """Main FIDO method."""
+    # Filenames on media imaged from other filesystems are not always valid
+    # UTF-8, and one of them used to abort the whole scan from the first
+    # sys.stdout.write, losing every file after it
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(errors="backslashreplace")
     if not args:
         args = sys.argv[1:]
     args = parse_cli_args(args, defaults)
