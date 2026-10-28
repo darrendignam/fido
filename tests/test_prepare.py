@@ -331,14 +331,20 @@ def test_parse_pronom_xml_extracts_core_fields(monkeypatch):
     payload = b"checksum-data"
 
     class DummySock:
-        def read(self):
+        def read(self, _size=None):
             return payload
 
         def close(self):
             return None
 
-    info = prepare.FormatInfo("dummy.zip")
-    monkeypatch.setattr(prepare, "urlopen", lambda _url: DummySock())
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+    info = prepare.FormatInfo("dummy.zip", fetch_reference_checksums=True)
+    monkeypatch.setattr(prepare, "urlopen", lambda _url, timeout=None: DummySock())
 
     result = info.parse_pronom_xml(io.BytesIO(_minimal_pronom_xml()))
 
@@ -537,39 +543,28 @@ def test_parse_pronom_xml_extracts_super_and_subtype_relationships(monkeypatch):
     assert result.find("details/is_subtype_of").text == "301"
 
 
-def test_parse_pronom_xml_reference_file_http_404_continues(monkeypatch, capsys):
-    info = prepare.FormatInfo("dummy.zip")
+@pytest.mark.parametrize("code", (404, 500))
+def test_parse_pronom_xml_records_no_checksum_when_the_fetch_fails(code, monkeypatch, capsys):
+    """A failed fetch must leave the checksum empty and say so.
+
+    A non-404 used to fall through and record md5(b""), which is a real
+    looking hash of nothing.
+    """
+    info = prepare.FormatInfo("dummy.zip", fetch_reference_checksums=True)
     monkeypatch.setattr(
         prepare,
         "urlopen",
-        lambda _url: (_ for _ in ()).throw(
-            urllib.error.HTTPError(url="http://example.test/file", code=404, msg="missing", hdrs=None, fp=None)
+        lambda _url, timeout=None: (_ for _ in ()).throw(
+            urllib.error.HTTPError(url="http://example.test/file", code=code, msg="error", hdrs=None, fp=None)
         ),
     )
 
     result = info.parse_pronom_xml(io.BytesIO(_minimal_pronom_xml()))
 
     checksum = result.find("details/example_file/checksum")
-    assert checksum is not None
-    assert checksum.text in (None, "")
-    assert "HTTP 404 error loading resource" in capsys.readouterr().err
-
-
-def test_parse_pronom_xml_reference_file_http_non_404_uses_empty_hash(monkeypatch, capsys):
-    info = prepare.FormatInfo("dummy.zip")
-    monkeypatch.setattr(
-        prepare,
-        "urlopen",
-        lambda _url: (_ for _ in ()).throw(
-            urllib.error.HTTPError(url="http://example.test/file", code=500, msg="error", hdrs=None, fp=None)
-        ),
-    )
-
-    result = info.parse_pronom_xml(io.BytesIO(_minimal_pronom_xml()))
-
-    checksum = result.find("details/example_file/checksum")
-    assert checksum.text == hashlib.md5(b"").hexdigest()
-    assert "HTTP 500 error loading resource" in capsys.readouterr().err
+    assert checksum.text == ""
+    assert checksum.text != hashlib.md5(b"").hexdigest()
+    assert "Error loading resource" in capsys.readouterr().err
 
 
 def converted_patterns(record_name):
@@ -704,3 +699,39 @@ def test_load_pronom_xml_keeps_the_sorted_order(monkeypatch, tmp_path):
     info.load_pronom_xml()
 
     assert [fmt.findtext("puid") for fmt in info.formats] == ["fmt/2", "x-fmt/1"]
+
+
+def test_reference_checksums_are_not_fetched_by_default(monkeypatch):
+    """Conversion must be offline unless the caller opts in.
+
+    The URL comes from PRONOM data, so dereferencing it per record turned an
+    offline build into thousands of requests to a data-chosen host.
+    """
+    def refuse(*_args, **_kwargs):
+        raise AssertionError("parse_pronom_xml must not fetch by default")
+
+    monkeypatch.setattr(prepare, "urlopen", refuse)
+    info = prepare.FormatInfo("dummy.zip")
+
+    result = info.parse_pronom_xml(io.BytesIO(_minimal_pronom_xml()))
+
+    assert result.find("details/example_file/checksum").text == ""
+
+
+@pytest.mark.parametrize("url", ("file:///etc/hostname", "ftp://example.test/x", "gopher://example.test"))
+def test_reference_file_checksum_refuses_other_schemes(url, monkeypatch, capsys):
+    monkeypatch.setattr(prepare, "urlopen", lambda *_a, **_k: pytest.fail("must not dereference " + url))
+
+    assert prepare.reference_file_checksum(url) == ""
+    assert "unsupported scheme" in capsys.readouterr().err
+
+
+def test_reference_file_checksum_survives_a_failed_fetch(monkeypatch, capsys):
+    """One unreachable reference file must not abandon the conversion."""
+    def boom(*_args, **_kwargs):
+        raise prepare.URLError("offline")
+
+    monkeypatch.setattr(prepare, "urlopen", boom)
+
+    assert prepare.reference_file_checksum("https://example.test/x") == ""
+    assert "Error loading resource" in capsys.readouterr().err
