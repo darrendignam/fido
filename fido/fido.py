@@ -294,7 +294,7 @@ class Fido:
         obj = Info()
         obj.count = self.current_count
         obj.group_size = len(matches)
-        obj.filename = fullname
+        obj.filename = field_value(fullname)
         obj.time = int(delta_t * 1000)
         obj.filesize = self.current_filesize
         obj.matchtype = matchtype
@@ -315,10 +315,11 @@ class Fido:
             i += 1
             obj.group_index = i
             obj.puid = self.get_puid(f)
-            obj.formatname = f.find("name").text
-            obj.signaturename = sig_name
+            obj.formatname = field_value(f.find("name").text)
+            obj.signaturename = field_value(sig_name)
             mime = f.find("mime")
-            obj.mimetype = mime.text if mime is not None else None
+            # An absent element used to print the literal string "None"
+            obj.mimetype = field_value(mime.text) if mime is not None else ""
             version = f.find("version")
             obj.version = version.text if version is not None else None
             alias = f.find("alias")
@@ -391,6 +392,11 @@ class Fido:
             elif extension and (len(matches) == 0 or self.current_filesize == 0):
                 matches = self.match_extensions(filename)
                 self.handle_matches(filename, matches, timer.duration(), "extension")
+            else:
+                # Without this a file scanned with -noextension, or a zero byte
+                # file, produced no row at all, so counting output rows did not
+                # tell you how many files were examined
+                self.handle_matches(filename, [], timer.duration(), "fail")
             # only recurse into certain containers, like ZIP or TAR
             container = self.container_type(matches)
             # till here matey!
@@ -607,8 +613,8 @@ class Fido:
         try:
             with zipfile.ZipFile((fileobj if fileobj else filename), "r") as zipstream:
                 for item in zipstream.infolist():
-                    if item.file_size == 0:
-                        continue  # TODO: Find a better test for isdir, Python 3.6 adds is_dir() test to ZipInfo class
+                    if item.is_dir():
+                        continue
                     timer = PerfTimer()
                     with zipstream.open(item) as f:
                         item_name = filename + "!" + item.filename
@@ -623,6 +629,8 @@ class Fido:
                     elif extension and (len(matches) == 0 or self.current_filesize == 0):
                         matches = self.match_extensions(item_name)
                         self.handle_matches(item_name, matches, timer.duration(), "extension")
+                    else:
+                        self.handle_matches(item_name, [], timer.duration(), "fail")
                     if self.container_type(matches):
                         target = tempfile.SpooledTemporaryFile(prefix="Fido")
                         with zipstream.open(item) as source:
@@ -766,19 +774,41 @@ class Fido:
             target.write(buf)
 
 
+def field_value(value):
+    """Return @param value safe to interpolate into a line of output.
+
+    A filename is attacker controlled, and the default templates wrap it in
+    quotes without escaping, so one containing a quote or a newline could add,
+    split or suppress records in the CSV a preservation pipeline ingests.
+    """
+    if value is None:
+        return ""
+    text = str(value)
+    # CSV quotes an embedded quote by doubling it; a line break ends the record
+    return text.replace('"', '""').replace("\r", " ").replace("\n", " ")
+
+
 def list_files(roots, recurse=False):
     """Return the files one at a time. Roots could be a fileobj or a list."""
     for root in roots:
-        root = root if root[-1] != "\n" else root[:-1]
+        root = root.rstrip("\n")
+        if not root:
+            # A blank line in an -input list used to normalise to ".", which
+            # silently walked the working directory
+            continue
         root = os.path.normpath(root)
         if os.path.isfile(root):
             yield root
-        else:
+        elif os.path.isdir(root):
             for path, _, files in os.walk(root):
                 for f in files:
                     yield os.path.join(path, f)
                 if not recurse:
                     break
+        else:
+            # Neither a file nor a directory: os.walk yields nothing for these,
+            # so a typo in a path produced a successful looking empty run
+            sys.stderr.write("FIDO: Not a file or directory: {0}\n".format(root))
 
 
 def main(args=None):
@@ -822,17 +852,11 @@ def main(args=None):
         sys.exit(0)
 
     if args.matchprintf:
-        try:
-            args.matchprintf = args.matchprintf.decode("string_escape")
-        except AttributeError:
-            args.matchprintf = args.matchprintf.replace(r"\n", "\n")
-            args.matchprintf = args.matchprintf.replace(r"\t", "\t")
+        args.matchprintf = args.matchprintf.replace(r"\n", "\n")
+        args.matchprintf = args.matchprintf.replace(r"\t", "\t")
     if args.nomatchprintf:
-        try:
-            args.nomatchprintf = args.nomatchprintf.decode("string_escape")
-        except AttributeError:
-            args.matchprintf = args.matchprintf.replace(r"\n", "\n")
-            args.matchprintf = args.matchprintf.replace(r"\t", "\t")
+        args.nomatchprintf = args.nomatchprintf.replace(r"\n", "\n")
+        args.nomatchprintf = args.nomatchprintf.replace(r"\t", "\t")
 
     fido = Fido(
         quiet=args.q,
@@ -872,9 +896,9 @@ def main(args=None):
         if (not args.input) and len(args.files) == 1 and args.files[0] == "-":
             if fido.zip:
                 raise RuntimeError("Multiple content read from stdin not yet supported.")
-                fido.identify_multi_object_stream(sys.stdin, extension=not args.noextension)
-            else:
-                fido.identify_stream(sys.stdin, args.filename, extension=not args.noextension)
+            # get_buffers accumulates bytes, so the text wrapper will not do
+            stdin = getattr(sys.stdin, "buffer", sys.stdin)
+            fido.identify_stream(stdin, args.filename, extension=not args.noextension)
         else:
             for file in list_files(args.files, args.recurse):
                 fido.identify_file(file, extension=not args.noextension)

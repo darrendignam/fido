@@ -34,7 +34,6 @@ def parse_cli_args(argv: List[str], defaults: Dict[str, Any]) -> argparse.Namesp
     parser = ArgumentParser(
         description=defaults["description"],
         epilog=defaults["epilog"],
-        fromfile_prefix_chars="@",
         formatter_class=RawTextHelpFormatter,
     )
     parser.add_argument(
