@@ -25,7 +25,7 @@ import urllib
 from urllib.error import HTTPError, URLError
 from xml.etree import ElementTree as ET
 
-from defusedxml.ElementTree import fromstring
+from defusedxml.ElementTree import ParseError, fromstring
 
 from fido import __version__
 
@@ -33,6 +33,13 @@ ENCODING = "utf-8"
 XML_PROC = '<?xml version="1.0" encoding="{}"?>'.format(ENCODING)
 TNA_DOMAIN = "nationalarchives.gov.uk"
 PRONOM_HOST = "www.{}".format(TNA_DOMAIN)
+# A stalled server would otherwise block the updater indefinitely
+HTTP_TIMEOUT = 60
+
+# The shipped v116 signature file holds 2398 FileFormat elements, so a response
+# carrying almost none is not a signature file at all
+MIN_EXPECTED_FORMATS = 100
+
 PRONOM_NS = "http://pronom.{}".format(TNA_DOMAIN)
 SIG_NS = "http://{}/pronom/SignatureFile".format(PRONOM_HOST)
 
@@ -53,10 +60,11 @@ HEADERS = {
 
 def get_sig_xml_for_puid(puid):
     """Return the full PRONOM signature XML for the passed PUID."""
-    req = urllib.request.Request("http://www.nationalarchives.gov.uk/pronom/{}.xml".format(puid))
-    response = urllib.request.urlopen(req)
-    xml = response.read()
-    return xml
+    # https: TNA answers http with a redirect, and this data becomes the
+    # regexes FIDO executes, so it must not travel in clear
+    req = urllib.request.Request("https://www.nationalarchives.gov.uk/pronom/{}.xml".format(puid))
+    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as response:
+        return response.read()
 
 
 def get_pronom_sig_version():
@@ -71,7 +79,7 @@ def get_pronom_sig_version():
     return int(ver_ele.text)
 
 
-def get_droid_signatures(version):
+def get_droid_signatures(version, min_formats=MIN_EXPECTED_FORMATS):
     """
     Get a DROID signature file by version.
 
@@ -83,19 +91,33 @@ def get_droid_signatures(version):
     format_count = False
     try:
         with urllib.request.urlopen(
-            "https://www.nationalarchives.gov.uk/documents/DROID_SignatureFile_V{}.xml".format(version)
+            "https://www.nationalarchives.gov.uk/documents/DROID_SignatureFile_V{}.xml".format(version),
+            timeout=HTTP_TIMEOUT,
         ) as f:
             xml = f.read().decode("utf-8")
             root_ele = fromstring(xml)
             format_count = len(
                 root_ele.findall(".//{http://www.nationalarchives.gov.uk/pronom/SignatureFile}FileFormat")
             )
-    except HTTPError as httpe:
+    # A maintenance page is well formed XML, so only HTTPError was far too
+    # narrow: a 200 carrying HTML was returned as a valid signature file and
+    # written over the installed one
+    except (HTTPError, URLError, OSError, ParseError, UnicodeDecodeError) as err:
         sys.stderr.write(
             "get_droid_signatures(): could not download signature file v{} due to exception: {}\n".format(
-                version, httpe
+                version, err
             )
         )
+        return [], False
+    if format_count < min_formats:
+        # The shipped v116 file holds 2398, so a handful means the response was
+        # not a signature file at all
+        sys.stderr.write(
+            "get_droid_signatures(): signature file v{} holds only {} formats, refusing it\n".format(
+                version, format_count
+            )
+        )
+        return [], False
     return xml, format_count
 
 
@@ -111,15 +133,20 @@ def _get_soap_ele_tree(soap_action):
 
 
 def _get_soap_response(soap_action, soap_string):
-    try:
-        req = urllib.request.Request("https://{}/pronom/service.asmx".format(PRONOM_HOST), data=soap_string)
-    except URLError:
-        print("There was a problem contacting the PRONOM service at http://{}/pronom/service.asmx.".format(PRONOM_HOST))
-        print("Please check your network connection and try again.")
-        sys.exit(1)
+    req = urllib.request.Request("https://{}/pronom/service.asmx".format(PRONOM_HOST), data=soap_string)
     for key, value in HEADERS.items():
         req.add_header(key, value)
     req.add_header("Content-length", "%d" % len(soap_string))
     req.add_header("SOAPAction", soap_action)
-    response = urllib.request.urlopen(req)
-    return response.read().decode(ENCODING)
+    try:
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as response:
+            return response.read().decode(ENCODING)
+    except (URLError, OSError) as err:
+        # The old guard wrapped Request(), which only parses a URL and raises
+        # ValueError, so this message was unreachable while a real connection
+        # failure escaped as a traceback
+        print(
+            "There was a problem contacting the PRONOM service at https://{}/pronom/service.asmx.".format(PRONOM_HOST)
+        )
+        print("Please check your network connection and try again. ({})".format(err))
+        sys.exit(1)

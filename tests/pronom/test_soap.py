@@ -73,7 +73,7 @@ def test_get_droid_signatures_counts_file_formats(mock_request):
 
     mock_request.urlopen.return_value = FakeResponse(sig_xml)
 
-    xml, count = fido.pronom.soap.get_droid_signatures(116)
+    xml, count = fido.pronom.soap.get_droid_signatures(116, min_formats=1)
     assert "SignatureFile" in xml
     assert count == 2
 
@@ -86,7 +86,7 @@ def test_get_droid_signatures_handles_http_error(mock_request, capsys):
         url="http://example.test", code=500, msg="boom", hdrs=None, fp=None
     )
 
-    xml, count = fido.pronom.soap.get_droid_signatures(116)
+    xml, count = fido.pronom.soap.get_droid_signatures(116, min_formats=1)
     captured = capsys.readouterr()
     assert xml == []
     assert count is False
@@ -103,10 +103,14 @@ def test_get_sig_xml_for_puid_returns_raw_xml(mock_request):
 
 
 @unittest.mock.patch("fido.pronom.soap.urllib.request", create=True)
-def test_get_soap_response_exits_on_request_error(mock_request, capsys):
-    """Exit with code 1 when creating the request fails."""
+def test_get_soap_response_exits_on_connection_error(mock_request, capsys):
+    """Exit with code 1 when the connection fails.
 
-    mock_request.Request.side_effect = urllib.error.URLError("offline")
+    The guard used to wrap Request(), which only parses a URL and raises
+    ValueError, so this message was unreachable while a real connection
+    failure escaped as a traceback from urlopen.
+    """
+    mock_request.urlopen.side_effect = urllib.error.URLError("offline")
 
     with pytest.raises(SystemExit) as exc:
         fido.pronom.soap._get_soap_response('"action"', b"<soap/>")
@@ -114,3 +118,34 @@ def test_get_soap_response_exits_on_request_error(mock_request, capsys):
     captured = capsys.readouterr()
     assert exc.value.code == 1
     assert "There was a problem contacting the PRONOM service" in captured.out
+    assert "https://" in captured.out
+
+
+@unittest.mock.patch("fido.pronom.soap.urllib.request", create=True)
+def test_get_droid_signatures_refuses_an_html_error_page(mock_request, capsys):
+    """A maintenance page is well formed XML, so it used to install cleanly.
+
+    get_droid_signatures returned it as a valid signature file, the caller
+    discarded the format count, and a known good file was overwritten with a
+    document holding no formats at all.
+    """
+    page = b"<html><body>Sorry, we are down for maintenance</body></html>"
+    mock_request.urlopen.return_value.__enter__.return_value.read.return_value = page
+
+    xml, count = fido.pronom.soap.get_droid_signatures(116)
+
+    assert xml == []
+    assert count is False
+    assert "refusing it" in capsys.readouterr().err
+
+
+@unittest.mock.patch("fido.pronom.soap.urllib.request", create=True)
+def test_get_droid_signatures_survives_a_network_failure(mock_request, capsys):
+    """Only HTTPError was caught, so a DNS failure aborted the whole update."""
+    mock_request.urlopen.side_effect = urllib.error.URLError("no route to host")
+
+    xml, count = fido.pronom.soap.get_droid_signatures(116)
+
+    assert xml == []
+    assert count is False
+    assert "could not download signature file" in capsys.readouterr().err
