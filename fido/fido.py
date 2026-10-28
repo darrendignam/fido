@@ -51,15 +51,15 @@ defaults = {
 FIDO is a command-line tool to identify the file formats of digital objects.
 It is designed for simple integration into automated work-flows.""",
     "epilog": """
-Open Preservation Foundation (http://www.openpreservation.org)
+Open Preservation Foundation (https://www.openpreservation.org)
 See License.txt for license information.
 Download from: https://github.com/openpreserve/fido/releases
-Usage guide: http://wiki.opf-labs.org/display/KB/FIDO+usage+guide
+Usage guide: https://github.com/openpreserve/fido
 Author: Adam Farquhar (BL), 2010
 Maintainer: Maurice de Rooij (OPF/NANETH), 2011, 2012, 2013
 FIDO uses the UK National Archives (TNA) PRONOM File Format
 and Container descriptions.
-PRONOM is available from http://www.nationalarchives.gov.uk/pronom/""",
+PRONOM is available from https://www.nationalarchives.gov.uk/pronom/""",
 }
 
 

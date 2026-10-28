@@ -1,0 +1,6 @@
+# Navigation for the pages under docs/. page.html passes this to navbar.html as
+# site.data.docnav; without it the navigation bar rendered empty.
+- title: Home
+  url: /
+- title: Releasing
+  url: /releasing.html

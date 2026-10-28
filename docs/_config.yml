@@ -1,0 +1,11 @@
+# Jekyll configuration for the site published at fido.openpreservation.org.
+# Without this file site.url and site.title are empty and the site is not
+# buildable as documented.
+title: FIDO
+description: Format Identification for Digital Objects
+url: https://fido.openpreservation.org
+baseurl: ""
+version: 2.0.0-dev
+exclude:
+  - Gemfile
+  - Gemfile.lock

@@ -3,18 +3,18 @@
 """
 PRONOM UTILS.
 
-PYTHON FUNCTION TO QUERY PRONOM VERSION
-AND DOWNLOAD SIGNATUREFILE
-USES PRONOM SOAP SERVICE
+Queries the OPF signature service over HTTPS for the available PRONOM
+signature versions and downloads them. That service is a plain REST API; the
+PRONOM SOAP service is used separately, by fido.pronom.soap.
 
-Open Planets Foundation (http://www.openplanetsfoundation.org)
+Open Preservation Foundation (https://www.openpreservation.org)
 See License.txt for license information.
-Download from: http://github.com/openplanets/fido/downloads
+Download from: https://github.com/openpreserve/fido/releases
 Author: Maurice de Rooij (OPF/NANETH), 2012
 
 PRONOM UTILS is a library used by FIDO.
 FIDO uses the UK National Archives (TNA) PRONOM File Format and Container descriptions.
-PRONOM is available from http://www.nationalarchives.gov.uk/pronom/
+PRONOM is available from https://www.nationalarchives.gov.uk/pronom/
 """
 
 import os

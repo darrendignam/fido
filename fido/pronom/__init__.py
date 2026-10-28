@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
+FIDO module to deal with all things PRONOM signature files.
+
 FIDO: Format Identifier for Digital Objects.
 
 Copyright 2010 The Open Preservation Foundation
@@ -17,4 +19,3 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
-"""FIDO module to deal with all things PRONOM signature files."""

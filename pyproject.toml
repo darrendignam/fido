@@ -6,10 +6,10 @@ build-backend = "setuptools.build_meta"
 name = "opf-fido"
 dynamic = ["version"]
 requires-python = ">= 3.8"
-description = "Format Identification for Digital Objects (FIDO)."
+description = "Identify the file formats of digital objects against the PRONOM registry."
 readme = "README.md"
 authors = [
-    { name = "Adam Farquhar (BL)" }  # Add email if available
+    { name = "Adam Farquhar (BL)" },
     ]
 license = "Apache-2.0"
 license-files = ["LICENSE.txt"]
