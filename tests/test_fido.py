@@ -955,3 +955,19 @@ def test_containersignature_file_argument_is_honoured(monkeypatch):
     fido = fido_mod.Fido(quiet=True, containersignature_file="my-container-sigs.xml", format_files=[])
 
     assert fido.containersignature_file == "my-container-sigs.xml"
+
+
+def test_bare_invocation_prints_a_message_and_exits_non_zero(monkeypatch, capsys):
+    """master printed usage and exited 1 for a bare fido.
+
+    The guard was lost when argument parsing moved to cli_args.py, so bare fido
+    loaded every signature file, reported "Processed 0 files" and exited 0,
+    telling a calling script that nothing had gone wrong.
+    """
+    monkeypatch.setattr(fido_mod, "parse_cli_args", lambda *_a: _main_args(files=[]))
+
+    with pytest.raises(SystemExit) as exit_info:
+        fido_mod.main([])
+
+    assert exit_info.value.code != 0
+    assert "nothing to do" in capsys.readouterr().err
