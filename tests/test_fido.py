@@ -374,13 +374,19 @@ def test_main_sigs_calls_action(monkeypatch):
             fido_extension_signature="format_extensions.xml",
         ),
     )
-    monkeypatch.setattr(fido_mod, "sig_file_actions", lambda value: calls.__setitem__("sigs", value))
+    # Records the directory too: it was not passed, so every -sigs action read
+    # the packaged versions.xml regardless of -confdir
+    monkeypatch.setattr(
+        fido_mod, "sig_file_actions", lambda value, config_dir=None: calls.__setitem__("sigs", (value, config_dir))
+    )
 
     with pytest.raises(SystemExit) as exc:
         fido_mod.main(["-sig", "list"])
 
     assert exc.value.code == 0
-    assert calls["sigs"] == "list"
+    action, config_dir = calls["sigs"]
+    assert action == "list"
+    assert config_dir is not None, "-confdir must reach sig_file_actions"
 
 
 def test_main_stdin_zip_exits_with_a_message(monkeypatch):
