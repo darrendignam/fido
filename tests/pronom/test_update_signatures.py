@@ -1,22 +1,21 @@
-import importlib
 import os
-import sys
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 
 import pytest
 
+from fido.pronom import update_signatures
+
 
 @pytest.fixture
-def update_signatures_module(monkeypatch):
-    fake_pronom = ModuleType("pronom")
-    fake_prepare = ModuleType("pronom.prepare")
-    fake_prepare.run = lambda: None
-    fake_pronom.prepare = fake_prepare
+def update_signatures_module():
+    """The real module.
 
-    monkeypatch.setitem(sys.modules, "pronom", fake_pronom)
-    monkeypatch.setitem(sys.modules, "pronom.prepare", fake_prepare)
-    module = importlib.import_module("fido.pronom.update_signatures")
-    return importlib.reload(module)
+    This used to inject a fabricated top-level `pronom` package into
+    sys.modules, which supplied the very import the module got wrong and
+    so hid that it could not be imported at all. Import it plainly, and
+    let an import error fail the suite.
+    """
+    return update_signatures
 
 
 def test_get_puid_file_name(update_signatures_module):
@@ -376,3 +375,13 @@ def test_main_parses_cli_args_and_calls_run(update_signatures_module, monkeypatc
     assert captured["opts"]["http_throttle"] == 0.1
     assert captured["opts"]["version"] == "116"
     assert captured["opts"]["signatureFileName"] == update_signatures_module.DEFAULTS["signatureFileName"]
+
+
+def test_module_imports_without_help_from_the_test_suite():
+    """The console script entry point must be importable and callable.
+
+    fido-update-signatures is wired to main(); run() alone cannot build a
+    complete options dict from DEFAULTS.
+    """
+    assert callable(update_signatures.main)
+    assert update_signatures.prepare_pronom_to_fido.__module__ == "fido.pronom.prepare"

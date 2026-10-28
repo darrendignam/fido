@@ -25,9 +25,9 @@ classifiers = [
     ]   
 
 dependencies = [
-    "olefile >= 0.46, < 1",
-    "requests >= 2",
-    "defusedxml >= 0.7"
+    "olefile >= 0.47, < 1",
+    "requests >= 2.32.4, < 3",
+    "defusedxml >= 0.7.1"
     ]
 
 [project.urls]
@@ -50,7 +50,7 @@ build = [
 fido = "fido.fido:main"
 fido-prepare = "fido.pronom.prepare:main"
 fido-toxml = "fido.toxml:main"
-fido-update-signatures = "fido.pronom.update_signatures:run"
+fido-update-signatures = "fido.pronom.update_signatures:main"
 
 [tool.setuptools]
 include-package-data = true
