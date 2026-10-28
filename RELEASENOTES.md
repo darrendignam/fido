@@ -9,6 +9,26 @@ Copyright 2010 The Open Preservation Foundation
 Fido is made available under the Apache License, Version 2.0; see the file
 LICENSE.txt for details.
 
+Fido 2.0.0
+----------
+
+2.0 is a maintenance release that drops Python 2 and modernises the build.
+
+Breaking changes:
+
+* Python 2 support removed; Python 3.9 or later is required.
+* `setup.py`, the `Makefile`, the `Dockerfile` and `requirements/` are gone.
+  Installation and development now use `pyproject.toml`; see CONTRIBUTING.
+* `six` is no longer a dependency. `requests`, `defusedxml` and `regex` are.
+* The package was reorganised: PRONOM handling moved to `fido.pronom` and the
+  helpers to `fido.utils`. Code importing `fido.prepare` or `fido.pronom.http`
+  needs updating to `fido.pronom.prepare` and `fido.pronom.soap`.
+
+Fido 1.6.1
+----------
+
+* Signature update script version recorded in `conf/versions.xml`.
+
 Fido 1.6.0
 -------------
 

@@ -1,7 +1,7 @@
 Format Identification for Digital Objects (fido)
 ================================================
 
-By [Open Preservation Foundation](http://www.openpreservation.org)
+By [Open Preservation Foundation](https://www.openpreservation.org)
 
 [![Pytest](https://github.com/openpreserve/fido/actions/workflows/pytest.yml/badge.svg)](https://github.com/openpreserve/fido/actions/workflows/pytest.yml)
 [![Coverage](./coverage.svg)](https://github.com/openpreserve/fido/actions/workflows/pytest.yml)
@@ -10,11 +10,10 @@ FIDO is a command-line tool to identify the file formats of digital objects.
 It is designed for simple integration into automated work-flows.
 
 FIDO uses the UK National Archives (TNA) PRONOM File Format and Container descriptions.
-PRONOM is available from <http://www.nationalarchives.gov.uk/pronom/>
+PRONOM is available from <https://www.nationalarchives.gov.uk/pronom/>
 See [LICENSE](LICENSE.txt) for license information.
 
 * Download from: <https://github.com/openpreserve/fido/releases>
-* Usage guide: <http://wiki.opf-labs.org/display/KB/FIDO+usage+guide>
 * Author: Adam Farquhar (BL), 2010
 * Maintainer: Maurice de Rooij (OPF/NANETH), 2011, 2012, 2013, Misty de Meo 2014, 2015, 2016, Holly Becker 2016
 
@@ -29,7 +28,7 @@ usage: fido [-h] [-v] [-q] [-recurse] [-zip] [-noextension] [-nocontainer]
             [-bufsize BUFSIZE] [-sigs SIG_ACT]
             [-container_bufsize CONTAINER_BUFSIZE]
             [-loadformats XML1,...,XMLn] [-confdir CONFDIR]
-            [FILE [FILE ...]]
+            [FILE ...]
 ```
 
 positional arguments:
@@ -43,27 +42,31 @@ optional arguments:
 * `-q`: run (more) quietly
 * `-recurse`: recurse into subdirectories
 * `-zip`: recurse into zip and tar files
+* `-noextension`: disable extension matching, reduces number of matches but may reduce false positives
 * `-nocontainer`: disable deep scan of container documents, increases speed but may reduce accuracy with big files
 * `-pronom_only`: disables loading of format extensions file, only PRONOM signatures are loaded, may reduce accuracy of results
-* `-input INPUT`: file containing a list of files to check, one per line. - means stdin
+* `-input INPUT`: file containing a list of files to check, one per line. - means stdin. Cannot be combined with `FILE` arguments
 * `-filename FILENAME`: filename if file contents passed through STDIN
 * `-useformats INCLUDEPUIDS`: comma separated string of formats to use in identification
 * `-nouseformats EXCLUDEPUIDS`: comma separated string of formats not to use in identification
-* `-matchprintf FORMATSTRING`: format string (Python style) to use on match. See nomatchprintf, README.txt.
-* `-nomatchprintf FORMATSTRING`: format string (Python style) to use if no match. See README.txt
+* `-matchprintf FORMATSTRING`: format string (Python style) to use on match. See the Format strings section below
+* `-nomatchprintf FORMATSTRING`: format string (Python style) to use if no match. See the Format strings section below
 * `-bufsize BUFSIZE`: size (in bytes) of the buffer to match against (default=131072 bytes)
 * `-sigs SIG_ACT`: SIG_ACT "check" for new version of signature file for download.
                    SIG_ACT "list" list all available sig file versions.
                    SIG_ACT "update" to automatically update to latest available sig file.
-                   SIG_ACT "n" download and use version n.
-* `-container_bufsize CONTAINER_BUFSIZE`: size (in bytes) of the buffer to match against (default=524288 bytes)
+                   SIG_ACT "n" download version n and record it in `conf/versions.xml`. FIDO then exits, so this does not identify files in the same run; the version is used from the next run onwards.
+* `-container_bufsize CONTAINER_BUFSIZE`: size (in bytes) read from each file inside a container when matching container signatures (default=524288)
 * `-loadformats XML1,...,XMLn`: comma separated string of XML format files to add.
-* `-confdir CONFDIR`: configuration directory to load_fido_xml, for example, the format specifications from.
+* `-confdir CONFDIR`: configuration directory to load the format specifications from (default: the `conf` directory inside the installed package)
+
+Both `-bufsize` and `-container_bufsize` must be at least 1024 bytes. A smaller
+buffer gives the matcher too little to work with and silently produces wrong
+identifications.
 
 Installation
 ------------
 
-(also see: <http://wiki.opf-labs.org/display/KB/FIDO+usage+guide>)
 
 Any platform
 
@@ -96,30 +99,30 @@ To check what version of the PRONOM signatures you are using
 type: `fido -v` and you'll see something like:
 
 ```shell
-FIDO v1.6.0 (pronom-xml-95.zip, container-signature-20200121.xml, format_extensions.xml)
+FIDO v2.0.0-dev (formats-v116.xml, container-signature-20231127.xml, format_extensions.xml)
 ```
 
-Here `pronom-xml-95.zip` denotes PRONOM version 95. To see if a more recent
+Here `formats-v116.xml` denotes PRONOM version 116. To see if a more recent
 set of signatures is available type `fido -sigs check` which will report back:
 
 ```shell
-Updated signatures v104 are available, current version is v95
+Updated signatures v120 are available, current version is v116
 ```
 
 if new signatures are available or
 
 ```shell
-Your signature files are up to date, current version is v104
+Your signature files are up to date, current version is v116
 ```
 
 if not. To update signatures to the latest version type `fido -sigs update`:
 
 ```shell
-Updated signatures v104 are available, current version is v95
+Updated signatures v120 are available, current version is v116
 Updating signatures
 ```
 
-If you are having trouble due to firewall restrictions, see OPF wiki: <http://wiki.opf-labs.org/display/PT/Command+Line+Interface+proxy+usage>
+If you are having trouble due to firewall restrictions, see OPF wiki: the proxy documentation for your platform
 
 Please note that this WILL NOT update the container signature file located in the 'conf' folder.
 The reason for this that the PRONOM container signature file contains special types
@@ -129,26 +132,52 @@ for the PRONOM container signature file it will show up in a next commit.
 Dependencies
 ------------
 
-FIDO 1.0 through 1.3.3 will run on Python 2.7 with no other dependencies.
+FIDO requires Python 3.9 or later. Python 2 support ended with FIDO 1.6.
 
-FIDO 1.3.4 and later requires the python dependency 'olefile'.  This can be
-installed using `pip install olefile`, by running `python setup.py install`,
-or a pip installation will handle dependencies.
+Installing with pip handles the runtime dependencies, which are:
 
-FIDO 1.3.3 and later have experimental Python 3 support.
+* `olefile`, to read OLE2 compound documents
+* `requests`, used by every `-sigs` action
+* `defusedxml`, to parse signature files safely
+* `regex`, which takes a per-match timeout so that a pathological PRONOM
+  pattern cannot occupy FIDO without bound
 
-FIDO 1.4 and later have Python 3 support.
+FIDO 2.0 and later use `pyproject.toml` for installation and development.
 
-FIDO 2.0 and later use pyproject Configuration for Installation and Development.
+Running the tests
+-----------------
+
+Install the development dependencies and run pytest:
+
+```shell
+pip install -e ".[dev]"
+pytest
+flake8 fido tests
+```
+
+The flake8 settings live in `.flake8`, so a bare run matches what CI runs.
+
+Other commands
+--------------
+
+Installing FIDO provides four commands:
+
+* `fido`: identify files, as described above
+* `fido-toxml`: convert FIDO's CSV output to XML, for example
+  `fido somedir | fido-toxml > output.xml`
+* `fido-prepare`: convert a PRONOM XML release into a FIDO signature file
+* `fido-update-signatures`: download PRONOM signatures and convert them.
+  `fido -sigs update` is the simpler route for most users
 
 Format Definitions
 ------------------
 
-By default, FIDO loads format information from two files `conf/formats.xml`
-and `conf/format_extensions.xml`. Addition format files can be specified using
-the `-loadformats` command line argument.  They should use the same syntax as
-`conf/format_extensions.xml`. If more than one format file needs to be specified,
-then they should be comma separated as with the `-formats` argument.
+By default, FIDO loads format information from two files, `conf/formats-v<N>.xml`
+and `conf/format_extensions.xml`. The first is named by `conf/versions.xml`, so
+the exact filename changes with the signature version. Additional format files
+can be specified using the `-loadformats` command line argument. They should use
+the same syntax as `conf/format_extensions.xml`. If more than one format file
+needs to be specified, then they should be comma separated.
 
 Output
 ------
@@ -161,10 +190,14 @@ an object called info with the following fields:
 
 * `printnomatch`: `info.count` (file N)
 
-The defaults for FIDO 1.0 are:
+The defaults are:
 
 * `printmatch`:
-* `"OK,%(info.time)s,%(info.puid)s,%(info.formatname)s,%(info.signaturename)s,%(info.filesize)s,\"%(info.filename)s\",\"%(info.mimetype)s\",\"%(info.matchtype)s\"\n"`
+* `"OK,%(info.time)s,%(info.puid)s,\"%(info.formatname)s\",\"%(info.signaturename)s\",%(info.filesize)s,\"%(info.filename)s\",\"%(info.mimetype)s\",\"%(info.matchtype)s\"\n"`
+
+Note that `info.formatname` and `info.signaturename` are quoted, because format
+names frequently contain commas. Any quote inside a value is doubled, as CSV
+requires, so a row always parses back to nine fields.
 
 * `printnomatch`:
 * `"KO,%(info.time)s,,,,%(info.filesize)s,\"%(info.filename)s\",,\"%(info.matchtype)s\"\n"`
@@ -233,7 +266,7 @@ When identifying big files, this behaviour can cause FIDO to slow down sigifican
 You can disable deep scanning by invoking FIDO with the `-nocontainer` argument.
 While disabling deep scan speeds up identification, it may reduce accuracy.
 
-At the moment (version 1.0) FIDO is not yet able to perform scanning containers which are
+FIDO is not yet able to perform scanning containers which are
 passed through STDIN. A workaround would be to save the stream to a temporary file and have
 FIDO identify this file.
 

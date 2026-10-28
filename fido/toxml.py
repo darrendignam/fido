@@ -2,21 +2,17 @@
 # -*- coding: utf-8 -*-
 
 """
-FIDO CSV output to XML.
+Convert FIDO's CSV output into XML.
 
-Author: Maurice de Rooij <maurice.de.rooij@nationaalarchief.nl>, September 2011
+Reads FIDO CSV on standard input and writes an XML document to standard
+output, for example:
 
-Usage in combination with FIDO:
-- Windows: python fido.py [ARGS] | python toxml.py > output.xml
-- Linux: fido.py [ARGS] | toxml.py > output.xml
+- fido somedir | fido-toxml > output.xml
+- fido-toxml < output.csv > output.xml
 
-Usage afterwards:
-- Windows: type output.csv | toxml.py > output.xml
-- Linux: cat output.csv | toxml.py > output.xml
-
-For difference in usage, see:
-- http://bugs.python.org/issue9390
-- http://support.microsoft.com/default.aspx?kbid=321788
+Installed as the fido-toxml command. Values are escaped, so a filename
+containing an ampersand or a tag does not break the document, and rows with
+the wrong number of fields are reported on stderr and skipped.
 """
 
 import csv
