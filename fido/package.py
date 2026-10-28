@@ -1,9 +1,16 @@
 """Support for containers."""
 
 import re
+import sys
 import zipfile
 
 import olefile
+
+
+# Container signatures match near the head of a member, so the whole member
+# never needs to be in memory. Without a cap a 200KB archive holding a 200MB
+# member drove peak RSS past 450MB.
+DEFAULT_MAX_READ = 512 * 1024
 
 
 class Package:
@@ -19,8 +26,15 @@ class Package:
     def _process_matches(self, data, puid, signatures):
         results = []
         for signature in signatures:
-            if re.search(signature["signature"], data):
-                results.append(puid)
+            try:
+                if re.search(signature["signature"], data):
+                    results.append(puid)
+            except re.error as err:
+                # A container signature that cannot compile means this format
+                # can never be identified; skipping it beats aborting the run
+                sys.stderr.write(
+                    "FIDO: invalid container signature for {}: {}\n".format(puid, err)
+                )
 
         return results
 
@@ -28,10 +42,11 @@ class Package:
 class OlePackage(Package):
     """OlePackage supports OLE containers."""
 
-    def __init__(self, ole, signatures):
+    def __init__(self, ole, signatures, max_read=DEFAULT_MAX_READ):
         """Instantiate OlePackage object given the location of its file and signatures."""
         self.ole = ole
         self.signatures = signatures
+        self.max_read = max_read
 
     def detect_formats(self):
         """Detect available formats inside the OLE container."""
@@ -55,7 +70,7 @@ class OlePackage(Package):
                         continue
 
                     with ole.openstream(filepath) as stream:
-                        contents = stream.read()
+                        contents = stream.read(self.max_read)
                         results.extend(self._process_puid_map(contents, puid_map))
 
                 return results
@@ -66,10 +81,11 @@ class OlePackage(Package):
 class ZipPackage(Package):
     """ZipPackage supports Zip containers."""
 
-    def __init__(self, zip_, signatures):
+    def __init__(self, zip_, signatures, max_read=DEFAULT_MAX_READ):
         """Instantiate ZipPackage object given the location of its file and signatures."""
         self.zip = zip_
         self.signatures = signatures
+        self.max_read = max_read
 
     def detect_formats(self):
         """Detect available formats inside the ZIP container."""
@@ -85,7 +101,7 @@ class ZipPackage(Package):
                     # Extract the requested file from the ZIP only once, and pass the same
                     # data to each signature that requires it.
                     with zip_.open(path) as id_file:
-                        contents = id_file.read()
+                        contents = id_file.read(self.max_read)
                         results.extend(self._process_puid_map(contents, puid_map))
 
                 return results

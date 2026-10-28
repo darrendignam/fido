@@ -448,14 +448,13 @@ def test_match_formats_covers_positions_and_exception_path(monkeypatch, capsys):
     ifb_fmt = _format_element("fmt/4")
     bad_fmt = _format_element("fmt/5")
 
+    # The BOF buffer deliberately carries its sequence away from offset zero,
+    # so a matcher that searched instead of anchoring would be caught
     add_signature(bof_fmt, "bof", "BOF", "abc")
     add_signature(eof_fmt, "eof", "EOF", "xyz")
     add_signature(var_fmt, "var", "VAR", "abc")
     add_signature(ifb_fmt, "ifb", "IFB", "abc")
-    bad_sig = XET.SubElement(bad_fmt, "signature")
-    XET.SubElement(bad_sig, "name").text = "bad"
-    bad_pat = XET.SubElement(bad_sig, "pattern")
-    XET.SubElement(bad_pat, "position").text = "BOF"
+    add_signature(bad_fmt, "bad", "BOF", "[unclosed")
 
     fido.formats = [bof_fmt, eof_fmt, var_fmt, ifb_fmt, bad_fmt]
     fido.puid_has_priority_over_map = {
@@ -469,8 +468,87 @@ def test_match_formats_covers_positions_and_exception_path(monkeypatch, capsys):
     matches = fido.match_formats(b"abc", b"xyz")
     matched_puids = {m[0].find("puid").text for m in matches}
 
-    assert {"fmt/1", "fmt/2", "fmt/3", "fmt/4"}.issubset(matched_puids)
-    assert "NoneType" in capsys.readouterr().err
+    assert matched_puids == {"fmt/1", "fmt/2", "fmt/3", "fmt/4"}
+    # The unusable pattern has to be reported against its PUID
+    assert "fmt/5" in capsys.readouterr().err
+
+
+def test_match_formats_anchors_bof_signatures_at_the_start(monkeypatch):
+    """A BOF signature must not match its sequence at a later offset.
+
+    Replacing re.match with re.search here would turn thousands of PRONOM
+    signatures into substring searches.
+    """
+    fido = _make_fido(monkeypatch)
+    fmt = _format_element("fmt/1")
+    sig = XET.SubElement(fmt, "signature")
+    XET.SubElement(sig, "name").text = "bof"
+    pat = XET.SubElement(sig, "pattern")
+    XET.SubElement(pat, "position").text = "BOF"
+    XET.SubElement(pat, "regex").text = "abc"
+    fido.formats = [fmt]
+    fido.puid_has_priority_over_map = {"fmt/1": frozenset()}
+
+    assert fido.match_formats(b"abc", b"") != []
+    assert fido.match_formats(b"zzabc", b"") == []
+
+
+def test_match_formats_does_not_swallow_programming_errors(monkeypatch):
+    """Only an unusable regex is tolerated; a real bug must surface.
+
+    The handler used to catch Exception, so any defect in matching silently
+    removed a format from consideration and FIDO reported a wrong answer.
+    """
+    fido = _make_fido(monkeypatch)
+    fmt = _format_element("fmt/1")
+    sig = XET.SubElement(fmt, "signature")
+    XET.SubElement(sig, "name").text = "bof"
+    pat = XET.SubElement(sig, "pattern")
+    XET.SubElement(pat, "position").text = "BOF"
+    XET.SubElement(pat, "regex").text = "abc"
+    fido.formats = [fmt]
+    fido.puid_has_priority_over_map = {"fmt/1": frozenset()}
+    monkeypatch.setattr(fido, "get_signatures", lambda _fmt: (_ for _ in ()).throw(TypeError("boom")))
+
+    with pytest.raises(TypeError):
+        fido.match_formats(b"abc", b"")
+
+
+def test_match_formats_result_is_independent_of_format_order(monkeypatch):
+    """Identification must not depend on the order of self.formats.
+
+    Priority was applied while collecting as well as afterwards, so a format
+    dropped during collection was missing from the set the second pass needed.
+    """
+    def build():
+        generic = _format_element("gen/1")
+        middle = _format_element("mid/1")
+        specific = _format_element("spc/1")
+        for fmt, name in ((generic, "gen"), (middle, "mid"), (specific, "spc")):
+            sig = XET.SubElement(fmt, "signature")
+            XET.SubElement(sig, "name").text = name
+            pat = XET.SubElement(sig, "pattern")
+            XET.SubElement(pat, "position").text = "BOF"
+            XET.SubElement(pat, "regex").text = "abc"
+        return generic, middle, specific
+
+    priority = {
+        "gen/1": frozenset(),
+        "mid/1": frozenset(["gen/1"]),
+        "spc/1": frozenset(["mid/1", "gen/1"]),
+    }
+
+    results = []
+    for order in ((0, 2, 1), (0, 1, 2), (2, 1, 0)):
+        fido = _make_fido(monkeypatch)
+        built = build()
+        fido.formats = [built[index] for index in order]
+        fido.puid_has_priority_over_map = priority
+        matches = fido.match_formats(b"abc", b"")
+        results.append({m[0].find("puid").text for m in matches})
+
+    assert results[0] == results[1] == results[2], results
+    assert results[0] == {"spc/1"}
 
 
 def test_get_buffers_non_seekable_long_stream(monkeypatch):
@@ -644,3 +722,25 @@ def test_main_keyboard_interrupt_exits_with_context(monkeypatch):
         fido_mod.main([])
 
     assert "Interrupt while identifying file STDIN" in str(exc.value)
+
+
+def test_process_format_element_replaces_a_childless_element(monkeypatch):
+    """An element's truth value is its child count, which is the wrong test.
+
+    A format element with no children was treated as absent, and the semantics
+    are scheduled to change so that every element counts as present.
+    """
+    fido = _make_fido(monkeypatch)
+    fido.formats = []
+    fido.puid_format_map = {}
+
+    first = XET.Element("format")
+    XET.SubElement(first, "puid").text = "fmt/1"
+    fido.process_format_element(first)
+
+    replacement = XET.Element("format")
+    XET.SubElement(replacement, "puid").text = "fmt/1"
+    fido.process_format_element(replacement)
+
+    assert fido.formats == [replacement]
+    assert fido.puid_format_map["fmt/1"] is replacement

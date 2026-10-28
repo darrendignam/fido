@@ -1,6 +1,24 @@
 import argparse
-from argparse import ArgumentParser, RawTextHelpFormatter
+from argparse import ArgumentParser, ArgumentTypeError, RawTextHelpFormatter
 from typing import Any, Dict, List
+
+
+MIN_BUFSIZE = 1024
+
+
+def buffer_size(value):
+    """Return @param value as a buffer size, rejecting anything unusable.
+
+    A zero or negative buffer silently misidentifies every file, because the
+    matcher is handed nothing to match against.
+    """
+    try:
+        size = int(value)
+    except ValueError:
+        raise ArgumentTypeError("{!r} is not an integer".format(value))
+    if size < MIN_BUFSIZE:
+        raise ArgumentTypeError("must be at least {} bytes, got {}".format(MIN_BUFSIZE, size))
+    return size
 
 
 def parse_cli_args(argv: List[str], defaults: Dict[str, Any]) -> argparse.Namespace:
@@ -99,7 +117,7 @@ def parse_cli_args(argv: List[str], defaults: Dict[str, Any]) -> argparse.Namesp
     )
     parser.add_argument(
         "-bufsize",
-        type=int,
+        type=buffer_size,
         default=None,
         help=f"size (in bytes) of the buffer to match against (default={defaults['bufsize']})",
     )
@@ -111,9 +129,9 @@ def parse_cli_args(argv: List[str], defaults: Dict[str, Any]) -> argparse.Namesp
     )
     parser.add_argument(
         "-container_bufsize",
-        type=int,
+        type=buffer_size,
         default=None,
-        help=f"size (in bytes) of the buffer to match against (default={defaults['container_bufsize']}).",
+        help=f"size (in bytes) read from each file inside a container when matching container signatures (default={defaults['container_bufsize']}).",
     )
     parser.add_argument(
         "-loadformats",
