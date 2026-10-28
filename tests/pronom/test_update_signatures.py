@@ -321,7 +321,12 @@ def test_run_calls_expected_pipeline(update_signatures_module, monkeypatch):
         lambda _sig: SimpleNamespace(findall=lambda _path, _ns: format_eles),
     )
     monkeypatch.setattr(update_signatures_module, "init_sig_download", lambda _d: (calls.append("init_sig_download") or ("tmp", False)))
-    monkeypatch.setattr(update_signatures_module, "download_signatures", lambda *_a: calls.append("download_signatures"))
+    recorded = {}
+    monkeypatch.setattr(
+        update_signatures_module,
+        "download_signatures",
+        lambda *args: (calls.append("download_signatures"), recorded.__setitem__("args", args)),
+    )
     monkeypatch.setattr(update_signatures_module, "create_zip_file", lambda *_a: calls.append("create_zip_file"))
     monkeypatch.setattr(update_signatures_module, "rmtree", lambda *_a, **_k: calls.append("rmtree"))
     monkeypatch.setattr(update_signatures_module, "update_versions_xml", lambda _v: calls.append("update_versions_xml"))
@@ -339,6 +344,14 @@ def test_run_calls_expected_pipeline(update_signatures_module, monkeypatch):
         "update_versions_xml",
         "prepare_pronom_to_fido",
     ]
+    # Arguments, not just the call order: swapping resume and tmpdir would make
+    # the updater treat a path as a boolean and a boolean as a directory, which
+    # an order-only assertion cannot see
+    defaults, passed_eles, resume, tmpdir = recorded["args"]
+    assert passed_eles is format_eles
+    assert resume is False
+    assert tmpdir == "tmp"
+    assert defaults["version"] == "latest"
 
 
 def test_run_skips_rmtree_when_delete_disabled(update_signatures_module, monkeypatch):

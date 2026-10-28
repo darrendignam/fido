@@ -38,7 +38,7 @@ defaults = {
     # doubling of the buffer. Matching them atomically gives the first-fit
     # behaviour DROID has, and the timeout bounds the aggregate cost.
     "atomic_patterns": True,
-    "match_timeout": 30,
+    "match_timeout": 2,
     "max_recursion_depth": 4,
     "max_member_size": 1024 * 1024 * 1024,
     "max_compression_ratio": 200,
@@ -351,9 +351,30 @@ class Fido:
         if compiled is None:
             # The regex matches bytes from a file, so the pattern is bytes too
             source = pat.find("regex").text.encode("utf8")
-            compiled = re.compile(make_atomic(source) if self.atomic_patterns else source)
+            compiled = REGEX_ENGINE.compile(make_atomic(source) if self.atomic_patterns else source)
             self.compiled_patterns[id(pat)] = compiled
         return compiled
+
+    def matches_buffer(self, regex, buffer, anchored):
+        """Return True if @param regex matches @param buffer.
+
+        A per-match timeout is passed when the engine supports one, so a
+        pathological pattern costs a bounded amount of time rather than an
+        unbounded one. Where it is not supported the match runs to completion
+        and match_formats' own budget is the only protection.
+        """
+        matcher = regex.match if anchored else regex.search
+        if not PER_MATCH_TIMEOUT_SUPPORTED or not self.match_timeout:
+            return bool(matcher(buffer))
+        try:
+            return bool(matcher(buffer, timeout=self.match_timeout))
+        except TimeoutError:
+            sys.stderr.write(
+                "FIDO: Gave up matching {0} against {1} after {2}s\n".format(
+                    self.get_puid(self.current_format), self.current_file, self.match_timeout
+                )
+            )
+            return False
 
     def print_matches(self, fullname, matches, delta_t, matchtype=""):
         """
@@ -830,17 +851,17 @@ class Fido:
                         pos = self.get_pos(pat)
                         regex = self.get_regex(pat)
                         if pos == "BOF":
-                            if not regex.match(bofbuffer):
+                            if not self.matches_buffer(regex, bofbuffer, anchored=True):
                                 success = False
                                 break
                         elif pos in ("EOF", "VAR", "IFB"):
                             buffer_ = eofbuffer if pos == "EOF" else bofbuffer
-                            if not regex.search(buffer_):
+                            if not self.matches_buffer(regex, buffer_, anchored=False):
                                 success = False
                                 break
                     if success:
                         result.append((format, sig.findtext("name")))
-            except re.error as err:
+            except REGEX_ENGINE.error as err:
                 # A pattern that cannot compile means that format can never be
                 # identified, so name it rather than emitting a bare message
                 sys.stderr.write("FIDO: invalid signature regex for {}: {}\n".format(self.get_puid(format), err))
@@ -887,6 +908,21 @@ def field_value(value):
     text = str(value)
     # CSV quotes an embedded quote by doubling it; a line break ends the record
     return text.replace('"', '""').replace("\r", " ").replace("\n", " ")
+
+
+try:
+    # The standard library cannot interrupt a match once it has started, and a
+    # PRONOM pattern that chains bounded gaps, such as fmt/134 for MP3, can
+    # backtrack for an unbounded time on a buffer of repeating bytes. The regex
+    # module takes a per-match timeout, which bounds it without changing what
+    # the pattern means.
+    import regex as _regex_engine
+
+    REGEX_ENGINE = _regex_engine
+    PER_MATCH_TIMEOUT_SUPPORTED = True
+except ImportError:
+    REGEX_ENGINE = re
+    PER_MATCH_TIMEOUT_SUPPORTED = False
 
 
 def _atomic_groups_supported():

@@ -36,7 +36,7 @@ class FakeRequest:
         self.headers[key] = value
 
 
-@unittest.mock.patch("fido.pronom.soap.urllib.request", create=True)
+@unittest.mock.patch("fido.pronom.soap.urllib.request")
 def test_pronom_version_from_mocked_soap_response(mock_request):
     """Parse signature version from a mocked SOAP payload."""
     xml = b"""<?xml version=\"1.0\" encoding=\"utf-8\"?>
@@ -59,7 +59,7 @@ def test_pronom_version_from_mocked_soap_response(mock_request):
     assert fido.pronom.soap.get_pronom_sig_version() == 116
 
 
-@unittest.mock.patch("fido.pronom.soap.urllib.request", create=True)
+@unittest.mock.patch("fido.pronom.soap.urllib.request")
 def test_get_droid_signatures_counts_file_formats(mock_request):
     """Count FileFormat elements from a mocked DROID signature XML file."""
     sig_xml = b"""<?xml version=\"1.0\" encoding=\"utf-8\"?>
@@ -78,7 +78,7 @@ def test_get_droid_signatures_counts_file_formats(mock_request):
     assert count == 2
 
 
-@unittest.mock.patch("fido.pronom.soap.urllib.request", create=True)
+@unittest.mock.patch("fido.pronom.soap.urllib.request")
 def test_get_droid_signatures_handles_http_error(mock_request, capsys):
     """Return fallback values and log an error when download fails."""
 
@@ -93,7 +93,7 @@ def test_get_droid_signatures_handles_http_error(mock_request, capsys):
     assert "could not download signature file v116" in captured.err
 
 
-@unittest.mock.patch("fido.pronom.soap.urllib.request", create=True)
+@unittest.mock.patch("fido.pronom.soap.urllib.request")
 def test_get_sig_xml_for_puid_returns_raw_xml(mock_request):
     """Return unmodified PRONOM XML bytes for a PUID."""
     payload = b"<root><foo>bar</foo></root>"
@@ -102,7 +102,7 @@ def test_get_sig_xml_for_puid_returns_raw_xml(mock_request):
     assert fido.pronom.soap.get_sig_xml_for_puid("fmt/18") == payload
 
 
-@unittest.mock.patch("fido.pronom.soap.urllib.request", create=True)
+@unittest.mock.patch("fido.pronom.soap.urllib.request")
 def test_get_soap_response_exits_on_connection_error(mock_request, capsys):
     """Exit with code 1 when the connection fails.
 
@@ -121,7 +121,7 @@ def test_get_soap_response_exits_on_connection_error(mock_request, capsys):
     assert "https://" in captured.out
 
 
-@unittest.mock.patch("fido.pronom.soap.urllib.request", create=True)
+@unittest.mock.patch("fido.pronom.soap.urllib.request")
 def test_get_droid_signatures_refuses_an_html_error_page(mock_request, capsys):
     """A maintenance page is well formed XML, so it used to install cleanly.
 
@@ -139,7 +139,7 @@ def test_get_droid_signatures_refuses_an_html_error_page(mock_request, capsys):
     assert "refusing it" in capsys.readouterr().err
 
 
-@unittest.mock.patch("fido.pronom.soap.urllib.request", create=True)
+@unittest.mock.patch("fido.pronom.soap.urllib.request")
 def test_get_droid_signatures_survives_a_network_failure(mock_request, capsys):
     """Only HTTPError was caught, so a DNS failure aborted the whole update."""
     mock_request.urlopen.side_effect = urllib.error.URLError("no route to host")
@@ -149,3 +149,62 @@ def test_get_droid_signatures_survives_a_network_failure(mock_request, capsys):
     assert xml == []
     assert count is False
     assert "could not download signature file" in capsys.readouterr().err
+
+
+@unittest.mock.patch("fido.pronom.soap.urllib.request")
+def test_per_puid_fetch_uses_https_and_the_documented_path(mock_request):
+    """The URL was never asserted, so pointing FIDO at the wrong host or
+    scheme would have passed. This fetch supplies the data that becomes the
+    regexes FIDO executes, so it must not travel in clear."""
+    recorded = {}
+
+    def record(url, *_args, **_kwargs):
+        recorded["url"] = url
+        return unittest.mock.MagicMock()
+
+    mock_request.Request.side_effect = record
+    mock_request.urlopen.return_value.__enter__.return_value.read.return_value = b"<x/>"
+
+    fido.pronom.soap.get_sig_xml_for_puid("fmt/18")
+
+    assert recorded["url"] == "https://www.nationalarchives.gov.uk/pronom/fmt/18.xml"
+
+
+@unittest.mock.patch("fido.pronom.soap.urllib.request")
+def test_soap_request_carries_its_action_and_headers(mock_request):
+    """The SOAPAction header and the service path were both unverified."""
+    recorded = {"headers": {}}
+
+    class FakeRequest:
+        def __init__(self, url, data=None):
+            recorded["url"] = url
+            recorded["data"] = data
+
+        def add_header(self, key, value):
+            recorded["headers"][key] = value
+
+    mock_request.Request.side_effect = FakeRequest
+    mock_request.urlopen.return_value.__enter__.return_value.read.return_value = b"<soap/>"
+
+    fido.pronom.soap._get_soap_response('"getVersion"', b"<envelope/>")
+
+    assert recorded["url"].startswith("https://")
+    assert recorded["url"].endswith("/pronom/service.asmx")
+    assert recorded["headers"]["SOAPAction"] == '"getVersion"'
+    assert recorded["headers"]["Content-length"] == str(len(b"<envelope/>"))
+
+
+@unittest.mock.patch("fido.pronom.soap.urllib.request")
+def test_every_soap_call_passes_a_timeout(mock_request):
+    """urlopen defaults to no timeout, so a stalled server hung the updater."""
+    recorded = []
+
+    def record(_req, *_args, **kwargs):
+        recorded.append(kwargs.get("timeout"))
+        return unittest.mock.MagicMock()
+
+    mock_request.urlopen.side_effect = record
+
+    fido.pronom.soap.get_sig_xml_for_puid("fmt/18")
+
+    assert recorded and all(timeout is not None for timeout in recorded)
