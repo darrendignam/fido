@@ -957,6 +957,13 @@ def main(args=None):
     if not args:
         args = sys.argv[1:]
     args = parse_cli_args(args, defaults)
+    if not (args.files or args.input or args.v or args.sigs):
+        # master printed usage and exited 1 for a bare invocation. The guard was
+        # lost when argument parsing moved to cli_args.py, so bare fido loaded
+        # every signature file, printed "Processed 0 files" and exited 0, which
+        # tells a calling script nothing went wrong.
+        sys.stderr.write("FIDO: nothing to do. Pass a file, a directory, -input or -sigs.\n")
+        sys.exit(1)
     timer = PerfTimer()
 
     versions = get_local_versions(args.confdir)
