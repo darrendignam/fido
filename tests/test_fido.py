@@ -837,3 +837,44 @@ def test_seekable_eof_buffer_handles_both_cases(monkeypatch):
 
     _bof, bounded, _ = fido.get_buffers(io.BytesIO(b"0123456789abcdefghij"), 12, seekable=True)
     assert bounded == b"456789ab"
+
+
+def test_refuses_a_member_whose_declared_size_is_too_large(monkeypatch, capsys):
+    fido = _make_fido(monkeypatch)
+    fido.max_member_size = 1024
+
+    assert fido.refuses_member("a.zip!big.bin", 2048, 2048) is True
+    assert "exceeds the limit" in capsys.readouterr().err
+
+
+def test_refuses_a_member_with_an_implausible_compression_ratio(monkeypatch, capsys):
+    """A decompression bomb is a small file that expands enormously."""
+    fido = _make_fido(monkeypatch)
+    fido.max_compression_ratio = 100
+
+    assert fido.refuses_member("a.zip!bomb.bin", 200 * 1024 * 1024, 200 * 1024) is True
+    assert "compression ratio" in capsys.readouterr().err
+
+
+def test_accepts_an_ordinary_member(monkeypatch):
+    fido = _make_fido(monkeypatch)
+
+    assert fido.refuses_member("a.zip!doc.xml", 50_000, 5_000) is False
+    # An uncompressed member reports no ratio at all
+    assert fido.refuses_member("a.tar!doc.xml", 50_000, None) is False
+
+
+def test_container_recursion_stops_at_the_depth_limit(monkeypatch, capsys):
+    """An archive nested inside itself recursed without end, and each level
+    held its own spooled copy in memory."""
+    fido = _make_fido(monkeypatch)
+    fido.max_recursion_depth = 3
+    calls = []
+    monkeypatch.setattr(fido, "walk_zip", lambda *a, **kw: calls.append(kw.get("depth")))
+
+    fido.identify_contents("a.zip", type="zip", depth=2)
+    assert calls == [2]
+
+    fido.identify_contents("a.zip", type="zip", depth=3)
+    assert calls == [2]
+    assert "Maximum container depth" in capsys.readouterr().err
