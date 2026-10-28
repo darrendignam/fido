@@ -1,0 +1,173 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - '[0-9]+.[0-9]+.[0-9]+*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: '3.12'
+
+jobs:
+  metadata:
+    name: Package metadata
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      # fido/__init__.py imports nothing but os.path, so the version is readable
+      # without installing the runtime dependencies
+      - name: Read version from package
+        id: version
+        run: |
+          version="$(python -c 'import fido; print(fido.__version__)')"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Package version: $version"
+
+      # A tag that disagrees with __version__ would produce a release whose
+      # assets are all named after the other version
+      - name: Check tag matches package version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          if [[ "$GITHUB_REF_NAME" != "${{ steps.version.outputs.version }}" ]]; then
+            echo "Tag $GITHUB_REF_NAME does not match package version ${{ steps.version.outputs.version }}" >&2
+            exit 1
+          fi
+
+  python-packages:
+    name: Python sdist and wheel
+    needs: metadata
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install build tools
+        run: python -m pip install --upgrade build twine
+
+      - name: Build
+        run: python -m build
+
+      - name: Check metadata
+        run: python -m twine check dist/*
+
+      # The signature data in fido/conf is shipped through package-data rather
+      # than being importable code, so a packaging mistake there produces a
+      # wheel that installs cleanly and then cannot identify anything
+      - name: Check signature data is in the wheel
+        run: |
+          wheel="$(find dist -name '*.whl' -print -quit)"
+          python - "$wheel" <<'PY'
+          import sys, zipfile
+          required = ("fido/conf/versions.xml", "fido/conf/format_extensions.xml")
+          names = set(zipfile.ZipFile(sys.argv[1]).namelist())
+          missing = [name for name in required if name not in names]
+          signatures = [n for n in names if n.startswith("fido/conf/formats-v") and n.endswith(".xml")]
+          containers = [n for n in names if n.startswith("fido/conf/container-signature-")]
+          if not signatures:
+              missing.append("fido/conf/formats-v*.xml")
+          if not containers:
+              missing.append("fido/conf/container-signature-*.xml")
+          if missing:
+              print("missing from wheel: {}".format(", ".join(missing)), file=sys.stderr)
+              raise SystemExit(1)
+          print("signature data present: {}, {}".format(signatures[0], containers[0]))
+          PY
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: python-packages
+          path: dist/*
+          if-no-files-found: error
+
+  smoke-test:
+    name: Installed wheel (${{ matrix.os }}, Python ${{ matrix.python-version }})
+    needs: python-packages
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2025]
+        python-version: ['3.10', '3.12']
+    steps:
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: python-packages
+          path: dist
+
+      # Installed from the built wheel in a clean environment, with no checkout,
+      # so nothing can be satisfied from the source tree by accident
+      - name: Install the wheel
+        shell: bash
+        run: |
+          wheel="$(find dist -name '*.whl' -print -quit)"
+          python -m pip install --upgrade pip
+          python -m pip install "$wheel"
+
+      - name: Identify a known file
+        shell: bash
+        run: |
+          printf 'GIF89a\x01\x00\x01\x00\x00\x00\x00;' > sample.gif
+          fido -v
+          fido sample.gif | tee result.csv
+          grep -q 'fmt/4' result.csv || {
+            echo "expected fido to identify a GIF as fmt/4" >&2
+            exit 1
+          }
+
+  github-release:
+    name: Draft GitHub release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [metadata, python-packages, smoke-test]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: python-packages
+          path: assets
+
+      - name: List assets
+        run: ls -lh assets
+
+      # Created as a draft so the release title and description are still
+      # written by hand before the release goes public, and so publishing the
+      # release stays the deliberate step that triggers the PyPI upload
+      - name: Create or update draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ needs.metadata.outputs.prerelease }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber assets/*
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$GITHUB_REF_NAME" \
+              --draft \
+              --generate-notes \
+              --prerelease="$PRERELEASE" \
+              assets/*
+          fi
