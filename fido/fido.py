@@ -29,6 +29,12 @@ from fido.utils.timer import PerfTimer
 defaults = {
     "config_dir": CONFIG_DIR,
     "bufsize": 128 * 1024,  # (bytes)
+    # A crafted archive can otherwise exhaust memory from a tiny file: a 204KB
+    # zip holding a 200MB member, or 31 levels of nesting each holding its own
+    # spooled copy. DROID applies comparable limits.
+    "max_recursion_depth": 4,
+    "max_member_size": 1024 * 1024 * 1024,
+    "max_compression_ratio": 200,
     "regexcachesize": 2084,  # (bytes)
     "printmatch": 'OK,%(info.time)s,%(info.puid)s,"%(info.formatname)s","%(info.signaturename)s",%(info.filesize)s,"%(info.filename)s","%(info.mimetype)s","%(info.matchtype)s"\n',
     "printnomatch": 'KO,%(info.time)s,,,,%(info.filesize)s,"%(info.filename)s",,"%(info.matchtype)s"\n',
@@ -73,6 +79,9 @@ class Fido:
         self.quiet = quiet
         self.bufsize = defaults["bufsize"] if bufsize is None else bufsize
         self.container_bufsize = defaults["container_bufsize"] if container_bufsize is None else container_bufsize
+        self.max_recursion_depth = defaults["max_recursion_depth"]
+        self.max_member_size = defaults["max_member_size"]
+        self.max_compression_ratio = defaults["max_compression_ratio"]
         self.printmatch = defaults["printmatch"] if printmatch is None else printmatch
         self.printnomatch = defaults["printnomatch"] if printnomatch is None else printnomatch
         self.handle_matches = self.print_matches if handle_matches is None else handle_matches
@@ -446,19 +455,28 @@ class Fido:
             # print >> sys.stderr, "FIDO: Error in identify_file: Path is {0}".format(filename)
             sys.stderr.write("FIDO: Error in identify_file: {}, exception: {}\n".format(filename, io_excep))
 
-    def identify_contents(self, filename, fileobj=None, type=False, extension=True):
+    def identify_contents(self, filename, fileobj=None, type=False, extension=True, depth=0):
         """
         Identify each item in a container (such as a zip or tar file).
 
         Call self.handle_matches on each item.
         @param fileobj could be a file, or a stream.
+        @param depth is the current nesting level, bounded to stop an archive
+        nested inside itself from recursing without end.
         """
         if not type:
             return
+        if depth >= self.max_recursion_depth:
+            sys.stderr.write(
+                "FIDO: Maximum container depth {0} reached, not descending into {1}\n".format(
+                    self.max_recursion_depth, filename
+                )
+            )
+            return
         if type == "zip":
-            self.walk_zip(filename, fileobj, extension=extension)
+            self.walk_zip(filename, fileobj, extension=extension, depth=depth)
         elif type == "tar":
-            self.walk_tar(filename, fileobj, extension=extension)
+            self.walk_tar(filename, fileobj, extension=extension, depth=depth)
         else:  # TODO: ouch!
             # TODO: Ouch indeed, this currently causes Fido to crash.
             # propose that this should be report and return or similar
@@ -563,6 +581,29 @@ class Fido:
                 return "ole"
         return False
 
+    def refuses_member(self, name, file_size, compress_size):
+        """Return True when a container member should not be read at all.
+
+        A decompression bomb is a small file that expands enormously, so the
+        declared size and the compression ratio are both checked before any of
+        it is read into memory.
+        """
+        if file_size is not None and file_size > self.max_member_size:
+            sys.stderr.write(
+                "FIDO: Skipping {0}: declared size {1} exceeds the limit of {2}\n".format(
+                    name, file_size, self.max_member_size
+                )
+            )
+            return True
+        if compress_size and file_size and file_size / compress_size > self.max_compression_ratio:
+            sys.stderr.write(
+                "FIDO: Skipping {0}: compression ratio {1:.0f}:1 exceeds the limit of {2}:1\n".format(
+                    name, file_size / compress_size, self.max_compression_ratio
+                )
+            )
+            return True
+        return False
+
     def can_recurse_into_container(self, container_type):
         """
         Return true if it is possible to recursively process this container.
@@ -659,7 +700,7 @@ class Fido:
                 break
         return bofbuffer, eofbuffer, bytes_read
 
-    def walk_zip(self, filename, fileobj=None, extension=True):
+    def walk_zip(self, filename, fileobj=None, extension=True, depth=0):
         """
         Identify the type of each item in the zip.
 
@@ -671,6 +712,8 @@ class Fido:
             with zipfile.ZipFile((fileobj if fileobj else filename), "r") as zipstream:
                 for item in zipstream.infolist():
                     if item.is_dir():
+                        continue
+                    if self.refuses_member(filename + "!" + item.filename, item.file_size, item.compress_size):
                         continue
                     timer = PerfTimer()
                     with zipstream.open(item) as f:
@@ -704,11 +747,12 @@ class Fido:
                                 target,
                                 self.container_type(matches),
                                 extension=extension,
+                                depth=depth + 1,
                             )
         except (IOError, OSError, zipfile.BadZipfile) as err:
             sys.stderr.write("FIDO: ZipError {0}: {1}\n".format(filename, err))
 
-    def walk_tar(self, filename, fileobj, extension=True):
+    def walk_tar(self, filename, fileobj, extension=True, depth=0):
         """
         Identify the type of each item in the tar.
 
@@ -720,6 +764,8 @@ class Fido:
             with tarfile.TarFile(filename, fileobj=fileobj, mode="r") as tarstream:
                 for item in tarstream.getmembers():
                     if not item.isfile():
+                        continue
+                    if self.refuses_member(filename + "!" + item.name, item.size, None):
                         continue
                     timer = PerfTimer()
                     with closing(tarstream.extractfile(item)) as f:
@@ -744,6 +790,7 @@ class Fido:
                                 f,
                                 self.container_type(matches),
                                 extension=extension,
+                                depth=depth + 1,
                             )
         except (tarfile.TarError, OSError) as err:
             sys.stderr.write("FIDO: Error: TarError {0}: {1}\n".format(filename, err))
