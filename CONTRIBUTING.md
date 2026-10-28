@@ -54,10 +54,16 @@ The checklist below contains some of our expectations, and will help you create 
   - Wrap the body at 72 characters
   - Use the body to explain what and why vs. how
 
+Install the project with its development dependencies first:
+
+    $ pip install -e ".[dev]"
+
 You should run these tools locally before pushing a commit by running the following commands:
 
     $ pytest
-    $ flake8 --ignore=E501 ./fido
+    $ flake8 fido tests
+
+The flake8 settings live in `.flake8`, so a bare run matches what CI runs.
 
 
 ## Code Review & Approval
@@ -76,3 +82,16 @@ To propose a release, a maintainer creates an issue with the release number and 
 Discussion can happen in the release ticket about what outstanding pull requests could be merged.
 If at least two maintainers approve and there are no disapprovals for a week, the release can be tagged and uploaded to PyPI.
 The maintainer who proposed the release should do the tagging and uploading.
+
+The version is read from `__version__` in `fido/__init__.py` via
+`[tool.setuptools.dynamic]`, so that is the only place to change it.
+To build and upload:
+
+    $ pip install -e ".[build]"
+    $ python -m build
+    $ python -m twine check dist/*
+    $ python -m twine upload dist/*
+
+Tagging the release also drives the automated workflows; see
+[docs/releasing.md](docs/releasing.md) for the tag-driven build and the
+PyPI trusted publisher setup.
