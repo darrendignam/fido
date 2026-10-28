@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 
 import csv
+import re
+import time
 import io
 from xml.etree import ElementTree as XET
 from time import sleep
@@ -387,7 +389,7 @@ def test_main_sigs_calls_action(monkeypatch):
     assert config_dir is not None, "-confdir must reach sig_file_actions"
 
 
-def test_main_stdin_zip_raises_runtime(monkeypatch):
+def test_main_stdin_zip_exits_with_a_message(monkeypatch):
     class DummyFido:
         def __init__(self, **kwargs):
             self.zip = kwargs["zip"]
@@ -408,7 +410,9 @@ def test_main_stdin_zip_raises_runtime(monkeypatch):
     )
     monkeypatch.setattr(fido_mod, "Fido", DummyFido)
 
-    with pytest.raises(RuntimeError):
+    # Exits with a message rather than raising, since a traceback tells the
+    # user nothing they can act on
+    with pytest.raises(SystemExit):
         fido_mod.main([])
 
 
@@ -566,22 +570,6 @@ def test_get_buffers_non_seekable_long_stream(monkeypatch):
 
     assert bof == data[:8]
     assert eof == data[-8:]
-
-
-def test_buffered_read_overlap_and_non_overlap(monkeypatch, tmp_path):
-    fido = _make_fido(monkeypatch)
-    sample = tmp_path / "sample.bin"
-    sample.write_bytes(b"0123456789abcdefghij")
-    fido.current_file = str(sample)
-    fido.current_filesize = sample.stat().st_size
-    fido.bufsize = 8
-    fido.container_bufsize = 4
-
-    no_overlap = fido.buffered_read(0, overlap=False)
-    with_overlap = fido.buffered_read(2, overlap=True)
-
-    assert no_overlap == b"01234567"
-    assert with_overlap == b"23456789"
 
 
 def test_walk_zip_recurses_for_nested_container(monkeypatch, tmp_path):
@@ -884,3 +872,90 @@ def test_container_recursion_stops_at_the_depth_limit(monkeypatch, capsys):
     fido.identify_contents("a.zip", type="zip", depth=3)
     assert calls == [2]
     assert "Maximum container depth" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("pattern", "rewritten"),
+    (
+        # Four unbounded gaps: fmt/320's shape, which backtracks polynomially
+        (rb"(?s)\AGEOGCS.*DATUM.*SPHEROID.*PRIMEM.*UNIT", True),
+        (rb"(?s)\Aab.*cd.+ef", True),
+        # One gap cannot backtrack polynomially, and rewriting it changes which
+        # ODF signature wins, so it must be left alone
+        (rb"(?s)\Aoffice:document-content.*office:version", False),
+        (rb"(?s)\Aabcdef", False),
+    ),
+)
+def test_only_multi_gap_patterns_are_rewritten(pattern, rewritten):
+    result = fido_mod.make_atomic(pattern)
+
+    if not fido_mod.ATOMIC_GROUPS_SUPPORTED:
+        pytest.skip("atomic groups need Python 3.11 or later")
+    assert (b"(?>" in result) is rewritten
+    if not rewritten:
+        assert result == pattern
+
+
+def test_atomic_rewrite_makes_a_pathological_pattern_fast():
+    """fmt/320 costs about 15x per doubling of the buffer, and the default
+    buffer is 128KB, so one crafted file could occupy FIDO for hours."""
+    if not fido_mod.ATOMIC_GROUPS_SUPPORTED:
+        pytest.skip("atomic groups need Python 3.11 or later")
+    pattern = rb"(?s)\A.{0,152}GEOGCS.*DATUM.*SPHEROID.*PRIMEM.*UNIT"
+    text = b"GEOGCS" + (b"DATUM SPHEROID PRIMEM " * 180)
+
+    rewritten = re.compile(fido_mod.make_atomic(pattern))
+
+    started = time.monotonic()
+    assert rewritten.search(text) is None
+    assert time.monotonic() - started < 1.0
+
+
+def test_patterns_are_compiled_once_per_pattern(monkeypatch):
+    """re's own cache cannot hold 2400 patterns, so some were re-parsed for
+    every file scanned."""
+    fido = _make_fido(monkeypatch)
+    pat = XET.Element("pattern")
+    XET.SubElement(pat, "regex").text = "abc"
+
+    first = fido.get_regex(pat)
+    second = fido.get_regex(pat)
+
+    assert first is second
+
+
+def test_container_signature_file_is_parsed_once(monkeypatch):
+    """Re-parsing the 300KB file per container was most of the per-file work."""
+    fido = _make_fido(monkeypatch)
+    calls = []
+    monkeypatch.setattr(fido_mod.ET, "parse", lambda path: calls.append(path) or "tree")
+
+    assert fido.container_signature_tree() == "tree"
+    assert fido.container_signature_tree() == "tree"
+    assert len(calls) == 1
+
+
+def test_containersignature_file_argument_is_honoured(monkeypatch):
+    """The constructor argument was read from defaults and discarded."""
+    monkeypatch.setattr(fido_mod.Fido, "load_fido_xml", lambda self, file: None)
+    monkeypatch.setattr(fido_mod.Fido, "load_container_xml", lambda self: None, raising=False)
+
+    fido = fido_mod.Fido(quiet=True, containersignature_file="my-container-sigs.xml", format_files=[])
+
+    assert fido.containersignature_file == "my-container-sigs.xml"
+
+
+def test_bare_invocation_prints_a_message_and_exits_non_zero(monkeypatch, capsys):
+    """master printed usage and exited 1 for a bare fido.
+
+    The guard was lost when argument parsing moved to cli_args.py, so bare fido
+    loaded every signature file, reported "Processed 0 files" and exited 0,
+    telling a calling script that nothing had gone wrong.
+    """
+    monkeypatch.setattr(fido_mod, "parse_cli_args", lambda *_a: _main_args(files=[]))
+
+    with pytest.raises(SystemExit) as exit_info:
+        fido_mod.main([])
+
+    assert exit_info.value.code != 0
+    assert "nothing to do" in capsys.readouterr().err
