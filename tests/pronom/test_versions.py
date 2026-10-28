@@ -1,4 +1,3 @@
-from pathlib import Path
 from types import SimpleNamespace
 from xml.etree import ElementTree as XET
 
@@ -106,21 +105,13 @@ def test_write_sigs_downloads_when_target_missing(monkeypatch, tmp_path):
     conf_dir = tmp_path / "conf"
     conf_dir.mkdir()
 
-    class FakeFiles:
-        def __init__(self, base):
-            self.base = Path(base)
-
-        def joinpath(self, *parts):
-            return self.base.joinpath(*parts)
-
-    monkeypatch.setattr(versions.importlib.resources, "files", lambda _pkg: FakeFiles(tmp_path))
     monkeypatch.setattr(
         versions.requests,
         "get",
         lambda _url, **_kwargs: DummyResponse(status_code=200, content=b"<formats>payload</formats>"),
     )
 
-    versions._write_sigs("116", "https://example.test/", "fido", "formats-v{}.xml")
+    versions._write_sigs("116", "https://example.test/", "fido", "formats-v{}.xml", str(conf_dir))
 
     assert (conf_dir / "formats-v116.xml").read_bytes() == b"<formats>payload</formats>"
 
@@ -131,18 +122,10 @@ def test_write_sigs_skips_when_target_exists(monkeypatch, tmp_path):
     existing = conf_dir / "formats-v116.xml"
     existing.write_text("<formats>present</formats>", encoding="utf-8")
 
-    class FakeFiles:
-        def __init__(self, base):
-            self.base = Path(base)
-
-        def joinpath(self, *parts):
-            return self.base.joinpath(*parts)
-
     called = {"http": 0}
-    monkeypatch.setattr(versions.importlib.resources, "files", lambda _pkg: FakeFiles(tmp_path))
     monkeypatch.setattr(versions.requests, "get", lambda _url, **_kwargs: called.__setitem__("http", called["http"] + 1))
 
-    versions._write_sigs("116", "https://example.test/", "fido", "formats-v{}.xml")
+    versions._write_sigs("116", "https://example.test/", "fido", "formats-v{}.xml", str(conf_dir))
 
     assert existing.read_text(encoding="utf-8") == "<formats>present</formats>"
     assert called["http"] == 0
@@ -173,19 +156,19 @@ def test_sig_file_actions_dispatches(monkeypatch, sig_act, expected_call, expect
     calls = {}
     fake_versions = SimpleNamespace(pronom_version="116", update_site="https://example.test")
 
-    monkeypatch.setattr(versions, "get_local_versions", lambda: fake_versions)
-    monkeypatch.setattr(versions, "_list_available_versions", lambda update_url: calls.__setitem__("list", update_url))
+    monkeypatch.setattr(versions, "get_local_versions", lambda *_a: fake_versions)
+    monkeypatch.setattr(versions, "_list_available_versions", lambda update_url, *_a: calls.__setitem__("list", update_url))
     monkeypatch.setattr(
         versions,
         "_check_update_signatures",
-        lambda sig_vers, update_url, vers, is_update: calls.__setitem__(
+        lambda sig_vers, update_url, vers, is_update, *_a: calls.__setitem__(
             "check", (sig_vers, update_url, vers, is_update)
         ),
     )
     monkeypatch.setattr(
         versions,
         "_download_sig_version",
-        lambda action, update_url, vers: calls.__setitem__("download", (action, update_url, vers)),
+        lambda action, update_url, vers, *_a: calls.__setitem__("download", (action, update_url, vers)),
     )
 
     with pytest.raises(SystemExit) as exc:
@@ -248,7 +231,7 @@ def test_download_sig_version_normalizes_number(monkeypatch):
     monkeypatch.setattr(
         versions,
         "_output_details",
-        lambda version, update_url, vers: calls.__setitem__("out", (version, update_url, vers)),
+        lambda version, update_url, vers, *_a: calls.__setitem__("out", (version, update_url, vers)),
     )
     target = object()
 
@@ -294,8 +277,8 @@ def test_sig_file_actions_keeps_trailing_slash(monkeypatch):
     calls = {}
     fake_versions = SimpleNamespace(pronom_version="116", update_site="https://example.test/")
 
-    monkeypatch.setattr(versions, "get_local_versions", lambda: fake_versions)
-    monkeypatch.setattr(versions, "_list_available_versions", lambda update_url: calls.__setitem__("list", update_url))
+    monkeypatch.setattr(versions, "get_local_versions", lambda *_a: fake_versions)
+    monkeypatch.setattr(versions, "_list_available_versions", lambda update_url, *_a: calls.__setitem__("list", update_url))
 
     with pytest.raises(SystemExit):
         versions.sig_file_actions("list")
@@ -316,7 +299,7 @@ def test_download_sig_version_accepts_prefixed_version(monkeypatch):
     monkeypatch.setattr(
         versions,
         "_output_details",
-        lambda version, update_url, vers: calls.__setitem__("out", (version, update_url, vers)),
+        lambda version, update_url, vers, *_a: calls.__setitem__("out", (version, update_url, vers)),
     )
     target = object()
 
@@ -367,17 +350,6 @@ def test_local_versions_setattr_creates_missing_field(monkeypatch, tmp_path):
     assert local.root.find("pronomVersion").text == "116"
 
 
-def _fake_conf(monkeypatch, directory):
-    class FakeFiles:
-        def __init__(self, base):
-            self.base = Path(base)
-
-        def joinpath(self, *parts):
-            return self.base.joinpath(*parts)
-
-    monkeypatch.setattr(versions.importlib.resources, "files", lambda _pkg: FakeFiles(directory))
-
-
 def test_write_sigs_refuses_a_non_200_response(monkeypatch, tmp_path, capsys):
     """An error page used to be installed as the signature file.
 
@@ -386,7 +358,6 @@ def test_write_sigs_refuses_a_non_200_response(monkeypatch, tmp_path, capsys):
     """
     conf_dir = tmp_path / "conf"
     conf_dir.mkdir()
-    _fake_conf(monkeypatch, tmp_path)
     monkeypatch.setattr(
         versions.requests,
         "get",
@@ -394,7 +365,7 @@ def test_write_sigs_refuses_a_non_200_response(monkeypatch, tmp_path, capsys):
     )
 
     with pytest.raises(SystemExit):
-        versions._write_sigs("200", "https://example.test/", "fido", "formats-v{}.xml")
+        versions._write_sigs("200", "https://example.test/", "fido", "formats-v{}.xml", str(conf_dir))
 
     assert not (conf_dir / "formats-v200.xml").exists()
 
@@ -403,7 +374,6 @@ def test_write_sigs_refuses_a_200_that_is_not_signature_data(monkeypatch, tmp_pa
     """A 200 carrying an HTML maintenance page is still not usable data."""
     conf_dir = tmp_path / "conf"
     conf_dir.mkdir()
-    _fake_conf(monkeypatch, tmp_path)
     monkeypatch.setattr(
         versions.requests,
         "get",
@@ -411,7 +381,7 @@ def test_write_sigs_refuses_a_200_that_is_not_signature_data(monkeypatch, tmp_pa
     )
 
     with pytest.raises(ValueError):
-        versions._write_sigs("200", "https://example.test/", "fido", "formats-v{}.xml")
+        versions._write_sigs("200", "https://example.test/", "fido", "formats-v{}.xml", str(conf_dir))
 
     assert not (conf_dir / "formats-v200.xml").exists()
     assert list(conf_dir.glob(".fido-*")) == []
@@ -423,14 +393,13 @@ def test_write_sigs_replaces_an_existing_corrupt_file(monkeypatch, tmp_path):
     conf_dir.mkdir()
     corrupt = conf_dir / "formats-v116.xml"
     corrupt.write_text("<html>error page</html>", encoding="utf-8")  # parses, but is not a formats file
-    _fake_conf(monkeypatch, tmp_path)
     monkeypatch.setattr(
         versions.requests,
         "get",
         lambda _url, **_kwargs: DummyResponse(status_code=200, content=b"<formats>good</formats>"),
     )
 
-    versions._write_sigs("116", "https://example.test/", "fido", "formats-v{}.xml")
+    versions._write_sigs("116", "https://example.test/", "fido", "formats-v{}.xml", str(conf_dir))
 
     assert corrupt.read_bytes() == b"<formats>good</formats>"
 
@@ -485,3 +454,52 @@ def test_local_versions_refuses_a_corrupt_file(tmp_path):
 
     with pytest.raises(SystemExit):
         versions.LocalVersions(str(versions_file))
+
+
+def test_sig_file_actions_uses_the_requested_config_dir(monkeypatch, tmp_path, capsys):
+    """-confdir has to select the versions.xml, and so the update site.
+
+    sig_file_actions re-read get_local_versions() with no argument, so every
+    -sigs action used the packaged versions.xml and silently contacted the
+    default service no matter what -confdir named.
+    """
+    versions_file = tmp_path / "versions.xml"
+    versions_file.write_text(
+        "<versions>"
+        "<pronomVersion>116</pronomVersion>"
+        "<pronomSignature>formats-v116.xml</pronomSignature>"
+        "<pronomContainerSignature>container-signature-20231127.xml</pronomContainerSignature>"
+        "<fidoExtensionSignature>format_extensions.xml</fidoExtensionSignature>"
+        "<updateScript>1.6.1</updateScript>"
+        "<updateSite>https://chosen.test</updateSite>"
+        "</versions>",
+        encoding="utf-8",
+    )
+    requested = []
+    monkeypatch.setattr(
+        versions.requests,
+        "get",
+        lambda url, **_kwargs: requested.append(url)
+        or DummyResponse(status_code=200, content=b"<formats><signature version='116'/></formats>"),
+    )
+
+    with pytest.raises(SystemExit):
+        versions.sig_file_actions("list", str(tmp_path))
+
+    assert requested == ["https://chosen.test/format/"]
+    assert "116" in capsys.readouterr().out
+
+
+def test_write_sigs_installs_into_the_requested_config_dir(monkeypatch, tmp_path):
+    """Downloads went into the package, not the directory being updated."""
+    conf_dir = tmp_path / "chosen"
+    conf_dir.mkdir()
+    monkeypatch.setattr(
+        versions.requests,
+        "get",
+        lambda _url, **_kwargs: DummyResponse(status_code=200, content=b"<formats>ok</formats>"),
+    )
+
+    versions._write_sigs("120", "https://example.test/", "fido", "formats-v{}.xml", str(conf_dir))
+
+    assert (conf_dir / "formats-v120.xml").read_bytes() == b"<formats>ok</formats>"
