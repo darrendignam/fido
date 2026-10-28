@@ -14,33 +14,61 @@ DEFAULT_MAX_READ = 512 * 1024
 
 
 class Package:
-    """Base class for container support."""
+    """Base class for container support.
 
-    def _process_puid_map(self, data, puid_map):
+    A subclass supplies open_container and read_member; the matching rules live
+    here so that ZIP and OLE2 containers cannot drift apart.
+    """
+
+    def detect_formats(self):
+        """Return the PUIDs of every container signature this package satisfies."""
         results = []
-        for puid, signatures in puid_map.items():
-            results.extend(self._process_matches(data, puid, signatures))
-
+        try:
+            with self.open_container() as container:
+                for puid, signatures in self.signatures.items():
+                    # Signatures for one PUID are alternatives, so any is enough
+                    if any(self._signature_matches(container, signature) for signature in signatures):
+                        results.append(puid)
+        except self.CONTAINER_ERRORS as err:
+            sys.stderr.write("FIDO: could not read container: {}\n".format(err))
+            return []
         return results
 
-    def _process_matches(self, data, puid, signatures):
-        results = []
-        for signature in signatures:
-            try:
-                if re.search(signature["signature"], data):
-                    results.append(puid)
-            except re.error as err:
-                # A container signature that cannot compile means this format
-                # can never be identified; skipping it beats aborting the run
-                sys.stderr.write(
-                    "FIDO: invalid container signature for {}: {}\n".format(puid, err)
-                )
+    def _signature_matches(self, container, signature):
+        """Return True when every file and every sequence of @param signature matches.
 
-        return results
+        The per-path results used to be combined with OR, and only the first
+        file and its first sequence were kept, so an archive missing the file
+        that discriminates between versions matched all of them at once.
+        """
+        for requirement in signature["files"]:
+            contents = self.read_member(container, requirement["path"])
+            if contents is None:
+                return False
+            for sequence in requirement["sequences"]:
+                if not self._sequence_matches(contents, sequence):
+                    return False
+        return True
+
+    @staticmethod
+    def _sequence_matches(contents, sequence):
+        try:
+            match = re.search(sequence["sequence"], contents)
+        except re.error as err:
+            # A container signature that cannot compile means this format can
+            # never be identified; skipping it beats aborting the run
+            sys.stderr.write("FIDO: invalid container signature: {}\n".format(err))
+            return False
+        if match is None:
+            return False
+        max_offset = sequence["max_offset"]
+        return max_offset is None or match.start() <= max_offset
 
 
 class OlePackage(Package):
     """OlePackage supports OLE containers."""
+
+    CONTAINER_ERRORS = (OSError, ValueError)
 
     def __init__(self, ole, signatures, max_read=DEFAULT_MAX_READ):
         """Instantiate OlePackage object given the location of its file and signatures."""
@@ -48,38 +76,45 @@ class OlePackage(Package):
         self.signatures = signatures
         self.max_read = max_read
 
-    def detect_formats(self):
-        """Detect available formats inside the OLE container."""
-        try:
-            with olefile.OleFileIO(self.ole) as ole:
-                results = []
-                for path, puid_map in self.signatures.items():
-                    # Each OLE container signature lists the path of the file inside the OLE
-                    # on which it operates; if the file is missing, there can be no match.
-                    # This is not a precise match because the name of the stream may slightly
-                    # differ; for example, \x01CompObj instead of CompObj
-                    filepath = None
-                    for paths in ole.listdir():
-                        p = "/".join(paths)
-                        if p == path or p[1:] == path:
-                            filepath = p
-                            break
+    def open_container(self):
+        """Return the opened OLE2 container."""
+        return olefile.OleFileIO(self.ole)
 
-                    # Path to match isn't in the container at all
-                    if filepath is None:
-                        continue
+    def read_member(self, container, path):
+        """Return the head of the stream at @param path, or None if it is absent."""
+        stream_path = self._resolve_path(container, path)
+        if stream_path is None:
+            return None
+        with container.openstream(stream_path) as stream:
+            return stream.read(self.max_read)
 
-                    with ole.openstream(filepath) as stream:
-                        contents = stream.read(self.max_read)
-                        results.extend(self._process_puid_map(contents, puid_map))
+    @staticmethod
+    def _resolve_path(container, path):
+        """Return the real stream name matching @param path, or None.
 
-                return results
-        except IOError:
-            return []
+        OLE2 stream names carry a control character prefix, for example
+        \x01CompObj for CompObj, and it appears on each path component rather
+        than only on the first. Stripping one character from the joined path
+        missed every nested stream, and matched any name differing by a single
+        leading character, so XHeader matched Header.
+        """
+        wanted = path.split("/")
+        fallback = None
+        for paths in container.listdir():
+            if paths == wanted:
+                return "/".join(paths)
+            if fallback is None and len(paths) == len(wanted) and all(
+                component.lstrip("\x01\x02\x03\x04\x05") == expected
+                for component, expected in zip(paths, wanted)
+            ):
+                fallback = "/".join(paths)
+        return fallback
 
 
 class ZipPackage(Package):
     """ZipPackage supports Zip containers."""
+
+    CONTAINER_ERRORS = (zipfile.BadZipfile, OSError, RuntimeError, UnicodeDecodeError, ValueError)
 
     def __init__(self, zip_, signatures, max_read=DEFAULT_MAX_READ):
         """Instantiate ZipPackage object given the location of its file and signatures."""
@@ -87,23 +122,14 @@ class ZipPackage(Package):
         self.signatures = signatures
         self.max_read = max_read
 
-    def detect_formats(self):
-        """Detect available formats inside the ZIP container."""
+    def open_container(self):
+        """Return the opened ZIP container."""
+        return zipfile.ZipFile(self.zip)
+
+    def read_member(self, container, path):
+        """Return the head of the member at @param path, or None if it is absent."""
         try:
-            with zipfile.ZipFile(self.zip) as zip_:
-                results = []
-                for path, puid_map in self.signatures.items():
-                    # Each ZIP container signature lists the path of the file inside the ZIP
-                    # on which it operates; if the file is missing, there can be no match.
-                    if path not in zip_.namelist():
-                        continue
-
-                    # Extract the requested file from the ZIP only once, and pass the same
-                    # data to each signature that requires it.
-                    with zip_.open(path) as id_file:
-                        contents = id_file.read(self.max_read)
-                        results.extend(self._process_puid_map(contents, puid_map))
-
-                return results
-        except (zipfile.BadZipfile, RuntimeError, UnicodeDecodeError):
-            return []
+            with container.open(path) as member:
+                return member.read(self.max_read)
+        except KeyError:
+            return None

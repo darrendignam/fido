@@ -82,7 +82,7 @@ def test_update_versions_xml_assigns_expected_values(update_signatures_module, m
     versions = SimpleNamespace(
         pronom_version=None,
         pronom_signature=None,
-        pronom_container_signature=None,
+        pronom_container_signature="container-signature-20231127.xml",
         fido_extension_signature=None,
         update_script=None,
     )
@@ -93,7 +93,11 @@ def test_update_versions_xml_assigns_expected_values(update_signatures_module, m
 
     assert versions.pronom_version == "117"
     assert versions.pronom_signature == "formats-v117.xml"
-    assert versions.pronom_container_signature == update_signatures_module.DEFAULTS["containerVersion"]
+    # The container signature file is on its own release cycle. Writing the
+    # UPDATE-ME placeholder here pointed FIDO at a file that does not exist,
+    # so every zip and OLE2 identification failed after a successful update.
+    assert versions.pronom_container_signature == "container-signature-20231127.xml"
+    assert "UPDATE-ME" not in versions.pronom_container_signature
     assert versions.fido_extension_signature == update_signatures_module.DEFAULTS["fidoSignatureVersion"]
     assert versions.update_script == update_signatures_module.__version__
     assert calls["write"] == 1

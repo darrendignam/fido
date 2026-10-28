@@ -243,7 +243,10 @@ def update_versions_xml(version):
     versions = get_local_versions()
     versions.pronom_version = str(version)
     versions.pronom_signature = "formats-v" + str(version) + ".xml"
-    versions.pronom_container_signature = DEFAULTS["containerVersion"]
+    # The container signature file is on a separate release cycle, which is
+    # what DEFAULTS["containerVersion"] records with its UPDATE-ME placeholder.
+    # Writing that placeholder into versions.xml pointed FIDO at a file that
+    # does not exist, so every zip and OLE2 identification then failed.
     versions.fido_extension_signature = DEFAULTS["fidoSignatureVersion"]
     versions.update_script = __version__
     versions.write()
