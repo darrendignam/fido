@@ -177,31 +177,63 @@ def test_init_sig_download_start_over_existing_directory(update_signatures_modul
     assert resume is False
 
 
-def test_init_sig_download_reports_failed_mkdir(update_signatures_module, monkeypatch, capsys, tmp_path):
+def test_init_sig_download_exits_when_mkdir_fails(update_signatures_module, monkeypatch, tmp_path):
+    """A failed mkdir used to be swallowed, and the run continued to a crash.
+
+    download_sig's open() is outside its try, so the run died with a bare
+    FileNotFoundError after the user had already answered two prompts.
+    """
     target = tmp_path / "tmp_download"
     monkeypatch.setattr(update_signatures_module, "query_yes_no", lambda _q: True)
-    monkeypatch.setattr(update_signatures_module.os, "mkdir", lambda _p: (_ for _ in ()).throw(OSError("fail")))
-    monkeypatch.setattr(update_signatures_module.os.path, "isdir", lambda _p: False)
+    monkeypatch.setattr(
+        update_signatures_module.os, "makedirs", lambda _p: (_ for _ in ()).throw(OSError("fail"))
+    )
 
-    tmpdir, resume = update_signatures_module.init_sig_download({"tmp_dir": str(target)})
-
-    assert tmpdir == str(target)
-    assert resume is False
-    assert "Failed to create temporary folder for PUID's" in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        update_signatures_module.init_sig_download({"tmp_dir": str(target)})
 
 
-def test_download_sig_skips_existing_when_resuming(update_signatures_module, monkeypatch, tmp_path):
+def test_init_sig_download_refuses_a_symlinked_temporary_folder(
+    update_signatures_module, monkeypatch, tmp_path
+):
+    """The path is predictable and inside the package, so a planted symlink
+    would redirect every download out of the intended directory."""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    link = tmp_path / "tmp_download"
+    link.symlink_to(elsewhere, target_is_directory=True)
+    monkeypatch.setattr(update_signatures_module, "query_yes_no", lambda _q: True)
+
+    with pytest.raises(SystemExit):
+        update_signatures_module.init_sig_download({"tmp_dir": str(link)})
+
+
+def test_download_sig_skips_a_complete_file_when_resuming(update_signatures_module, monkeypatch, tmp_path):
     called = {"download": 0}
     format_ele = SimpleNamespace(get=lambda key: "fmt/18" if key == "PUID" else None)
     existing = tmp_path / "puid.fmt.18.xml"
-    existing.write_text("already", encoding="utf-8")
+    existing.write_text("<PRONOM-Report/>", encoding="utf-8")
 
     monkeypatch.setattr(update_signatures_module, "get_sig_xml_for_puid", lambda _p: called.__setitem__("download", 1))
 
     update_signatures_module.download_sig(format_ele, str(tmp_path), True, {"http_throttle": 0.0})
 
     assert called["download"] == 0
-    assert existing.read_text(encoding="utf-8") == "already"
+    assert existing.read_text(encoding="utf-8") == "<PRONOM-Report/>"
+
+
+def test_download_sig_replaces_a_truncated_file_when_resuming(update_signatures_module, monkeypatch, tmp_path):
+    """Resume checked existence only, so a file truncated by an earlier
+    interrupt was treated as complete and baked into the PUID zip."""
+    format_ele = SimpleNamespace(get=lambda key: "fmt/18" if key == "PUID" else None)
+    truncated = tmp_path / "puid.fmt.18.xml"
+    truncated.write_text("<PRONOM-Repo", encoding="utf-8")
+
+    monkeypatch.setattr(update_signatures_module, "get_sig_xml_for_puid", lambda _p: b"<PRONOM-Report/>")
+
+    update_signatures_module.download_sig(format_ele, str(tmp_path), True, {"http_throttle": 0.0})
+
+    assert truncated.read_bytes() == b"<PRONOM-Report/>"
 
 
 def test_download_sig_exits_on_download_error(update_signatures_module, monkeypatch, tmp_path):

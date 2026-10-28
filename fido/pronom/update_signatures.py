@@ -18,6 +18,7 @@ import sys
 import time
 import zipfile
 from argparse import ArgumentParser
+import tempfile
 from shutil import rmtree
 
 from defusedxml import ElementTree as CET
@@ -140,8 +141,25 @@ def download_sig_file(version, sig_file):
     if not sig_xml:
         sys.exit("Failed to obtain PRONOM signature file, please try again.")
     print("Writing {0}...".format(DEFAULTS["signatureFileName"].format(version)))
-    with open(sig_file, "w") as file_:
-        file_.write(sig_xml)
+    # Explicit encoding, because the default is the locale's and an accented
+    # format name then raised after open("w") had already truncated the target,
+    # leaving a zero byte file where the working one was. Written to a sibling
+    # and renamed so a failure leaves the previous file intact.
+    write_atomically(sig_file, sig_xml.encode("utf-8"))
+
+
+def write_atomically(destination, content):
+    """Write @param content to @param destination via a temporary sibling."""
+    directory = os.path.dirname(os.path.abspath(destination))
+    handle, temporary = tempfile.mkstemp(dir=directory, prefix=".fido-", suffix=".part")
+    try:
+        with os.fdopen(handle, "wb") as out:
+            out.write(content)
+        os.replace(temporary, destination)
+    except BaseException:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+        raise
 
 
 def init_sig_download(defaults):
@@ -156,6 +174,10 @@ def init_sig_download(defaults):
         sys.exit(ABORT_MSG)
     tmpdir = defaults["tmp_dir"]
     resume = False
+    # islink as well as isdir: the path is predictable and inside the installed
+    # package, so a symlink planted there would redirect every download
+    if os.path.islink(tmpdir):
+        sys.exit("Refusing to use a symlinked temporary folder: {}".format(tmpdir))
     if os.path.isdir(tmpdir):
         print("Found previously created temporary folder for download:", tmpdir)
         resume = query_yes_no("Do you want to resume download (yes) or start over (no)?")
@@ -164,11 +186,9 @@ def init_sig_download(defaults):
     else:
         print("Creating temporary folder for download:", tmpdir)
         try:
-            os.mkdir(tmpdir)
-        except OSError:
-            pass
-    if not os.path.isdir(tmpdir):
-        sys.stderr.write("Failed to create temporary folder for PUID's, using: " + tmpdir)
+            os.makedirs(tmpdir)
+        except OSError as err:
+            sys.exit("Failed to create temporary folder for PUIDs at {}: {}".format(tmpdir, err))
     return tmpdir, resume
 
 
@@ -197,7 +217,9 @@ def download_sig(format_ele, tmpdir, resume, defaults):
     """
     puid, puid_filename = get_puid_file_name(format_ele)
     filename = os.path.join(tmpdir, puid_filename)
-    if os.path.isfile(filename) and resume:
+    # Existence alone meant a file truncated by an earlier interrupt was
+    # treated as complete and baked into the zip
+    if resume and os.path.isfile(filename) and _parses_as_xml(filename):
         return
     try:
         xml = get_sig_xml_for_puid(puid)
@@ -205,9 +227,17 @@ def download_sig(format_ele, tmpdir, resume, defaults):
         sys.stderr.write("Failed to download signature file:" + puid)
         sys.stderr.write("Error:" + str(e))
         sys.exit("Please restart and resume download.")
-    with open(filename, "wb") as file_:
-        file_.write(xml)
+    write_atomically(filename, xml)
     time.sleep(defaults["http_throttle"])
+
+
+def _parses_as_xml(path):
+    """Return True if @param path holds a well formed XML document."""
+    try:
+        CET.parse(path)
+    except (CET.ParseError, OSError):
+        return False
+    return True
 
 
 def create_zip_file(defaults, format_eles, version, tmpdir):
@@ -215,19 +245,31 @@ def create_zip_file(defaults, format_eles, version, tmpdir):
     print("Creating PRONOM zip...")
     compression = zipfile.ZIP_DEFLATED if "zlib" in sys.modules else zipfile.ZIP_STORED
     modes = {zipfile.ZIP_DEFLATED: "deflated", zipfile.ZIP_STORED: "stored"}
-    zf = zipfile.ZipFile(
-        os.path.join(CONFIG_DIR, DEFAULTS["pronomZipFileName"].format(version)),
-        mode="w",
-    )
+    destination = os.path.join(CONFIG_DIR, DEFAULTS["pronomZipFileName"].format(version))
+    # Built at a temporary path: opening the destination in mode "w" truncated
+    # the installed archive immediately, and zf.close() was unreachable if any
+    # write failed, so a mid-build error destroyed it
+    handle, temporary = tempfile.mkstemp(dir=CONFIG_DIR, prefix=".fido-", suffix=".zip.part")
+    os.close(handle)
     print("Adding files with compression mode", modes[compression])
-    for format_ele in format_eles:
-        _, puid_filename = get_puid_file_name(format_ele)
-        filename = os.path.join(tmpdir, puid_filename)
-        if os.path.isfile(filename):
-            zf.write(filename, arcname=puid_filename, compress_type=compression)
-            if defaults["deleteTempDirectory"]:
-                os.unlink(filename)
-    zf.close()
+    added = []
+    try:
+        with zipfile.ZipFile(temporary, mode="w") as zf:
+            for format_ele in format_eles:
+                _, puid_filename = get_puid_file_name(format_ele)
+                filename = os.path.join(tmpdir, puid_filename)
+                if os.path.isfile(filename):
+                    zf.write(filename, arcname=puid_filename, compress_type=compression)
+                    added.append(filename)
+        os.replace(temporary, destination)
+    except BaseException:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+        raise
+    # Only once the archive is safely in place
+    if defaults["deleteTempDirectory"]:
+        for filename in added:
+            os.unlink(filename)
 
 
 def get_puid_file_name(format_ele):

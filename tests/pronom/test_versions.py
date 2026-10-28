@@ -16,7 +16,7 @@ class DummyResponse:
 
 @pytest.mark.parametrize(
     "value, expected",
-    [("104", "104"), ("v104", "104"), ("V205", "V205")],
+    [("104", "104"), ("v104", "104"), ("V104", "104"), ("V205", "205")],
 )
 def test_get_version_accepts_valid_values(value, expected):
     assert versions._get_version(value) == expected
@@ -71,7 +71,7 @@ def test_version_check_returns_newer_version(monkeypatch):
     monkeypatch.setattr(
         versions.requests,
         "get",
-        lambda _url: DummyResponse(status_code=200, text='<signature version="v117" />'),
+        lambda _url, **_kwargs: DummyResponse(status_code=200, text='<signature version="v117" />'),
     )
 
     is_new, latest = versions._version_check("116", "https://example.test/")
@@ -83,7 +83,7 @@ def test_version_check_returns_not_new(monkeypatch):
     monkeypatch.setattr(
         versions.requests,
         "get",
-        lambda _url: DummyResponse(status_code=200, text='<signature version="116" />'),
+        lambda _url, **_kwargs: DummyResponse(status_code=200, text='<signature version="116" />'),
     )
 
     is_new, latest = versions._version_check("116", "https://example.test/")
@@ -95,7 +95,7 @@ def test_version_check_exits_on_http_error(monkeypatch):
     monkeypatch.setattr(
         versions.requests,
         "get",
-        lambda _url: DummyResponse(status_code=500, text=""),
+        lambda _url, **_kwargs: DummyResponse(status_code=500, text=""),
     )
 
     with pytest.raises(SystemExit):
@@ -117,19 +117,19 @@ def test_write_sigs_downloads_when_target_missing(monkeypatch, tmp_path):
     monkeypatch.setattr(
         versions.requests,
         "get",
-        lambda _url: DummyResponse(status_code=200, content=b"<xml>payload</xml>"),
+        lambda _url, **_kwargs: DummyResponse(status_code=200, content=b"<formats>payload</formats>"),
     )
 
     versions._write_sigs("116", "https://example.test/", "fido", "formats-v{}.xml")
 
-    assert (conf_dir / "formats-v116.xml").read_bytes() == b"<xml>payload</xml>"
+    assert (conf_dir / "formats-v116.xml").read_bytes() == b"<formats>payload</formats>"
 
 
 def test_write_sigs_skips_when_target_exists(monkeypatch, tmp_path):
     conf_dir = tmp_path / "conf"
     conf_dir.mkdir()
     existing = conf_dir / "formats-v116.xml"
-    existing.write_text("present", encoding="utf-8")
+    existing.write_text("<formats>present</formats>", encoding="utf-8")
 
     class FakeFiles:
         def __init__(self, base):
@@ -140,17 +140,17 @@ def test_write_sigs_skips_when_target_exists(monkeypatch, tmp_path):
 
     called = {"http": 0}
     monkeypatch.setattr(versions.importlib.resources, "files", lambda _pkg: FakeFiles(tmp_path))
-    monkeypatch.setattr(versions.requests, "get", lambda _url: called.__setitem__("http", called["http"] + 1))
+    monkeypatch.setattr(versions.requests, "get", lambda _url, **_kwargs: called.__setitem__("http", called["http"] + 1))
 
     versions._write_sigs("116", "https://example.test/", "fido", "formats-v{}.xml")
 
-    assert existing.read_text(encoding="utf-8") == "present"
+    assert existing.read_text(encoding="utf-8") == "<formats>present</formats>"
     assert called["http"] == 0
 
 
 def test_list_available_versions_prints_all(monkeypatch, capsys):
     payload = b"<root><signature version='116'/><signature version='117'/></root>"
-    monkeypatch.setattr(versions.requests, "get", lambda _url: DummyResponse(status_code=200, content=payload))
+    monkeypatch.setattr(versions.requests, "get", lambda _url, **_kwargs: DummyResponse(status_code=200, content=payload))
 
     versions._list_available_versions("https://example.test/")
 
@@ -244,7 +244,7 @@ def test_check_update_signatures_emits_up_to_date_message(monkeypatch, capsys):
 
 def test_download_sig_version_normalizes_number(monkeypatch):
     calls = {}
-    monkeypatch.setattr(versions.requests, "get", lambda _url: DummyResponse(status_code=200, content=b"", text=""))
+    monkeypatch.setattr(versions.requests, "get", lambda _url, **_kwargs: DummyResponse(status_code=200, content=b"", text=""))
     monkeypatch.setattr(
         versions,
         "_output_details",
@@ -258,7 +258,7 @@ def test_download_sig_version_normalizes_number(monkeypatch):
 
 
 def test_download_sig_version_exits_on_http_error(monkeypatch):
-    monkeypatch.setattr(versions.requests, "get", lambda _url: DummyResponse(status_code=404, content=b"", text=""))
+    monkeypatch.setattr(versions.requests, "get", lambda _url, **_kwargs: DummyResponse(status_code=404, content=b"", text=""))
 
     with pytest.raises(SystemExit) as exc:
         versions._download_sig_version("104", "https://example.test/", object())
@@ -312,7 +312,7 @@ def test_download_sig_version_rejects_invalid_input():
 
 def test_download_sig_version_accepts_prefixed_version(monkeypatch):
     calls = {}
-    monkeypatch.setattr(versions.requests, "get", lambda _url: DummyResponse(status_code=200, content=b"", text=""))
+    monkeypatch.setattr(versions.requests, "get", lambda _url, **_kwargs: DummyResponse(status_code=200, content=b"", text=""))
     monkeypatch.setattr(
         versions,
         "_output_details",
@@ -344,7 +344,9 @@ def test_get_local_versions_uses_config_dir(monkeypatch):
 def test_local_versions_init_fallback_uses_empty_root(monkeypatch, tmp_path):
     versions_file = tmp_path / "missing-versions.xml"
 
-    monkeypatch.setattr(versions, "parse", lambda _path: (_ for _ in ()).throw(IOError("missing")))
+    # A missing file is a fresh start; a corrupt one is reported instead, so
+    # the two must not be conflated
+    monkeypatch.setattr(versions, "parse", lambda _path: (_ for _ in ()).throw(FileNotFoundError("missing")))
     monkeypatch.setattr(versions, "ET", XET)
 
     local = versions.LocalVersions(str(versions_file))
@@ -363,3 +365,123 @@ def test_local_versions_setattr_creates_missing_field(monkeypatch, tmp_path):
 
     assert local.root.find("pronomVersion") is not None
     assert local.root.find("pronomVersion").text == "116"
+
+
+def _fake_conf(monkeypatch, directory):
+    class FakeFiles:
+        def __init__(self, base):
+            self.base = Path(base)
+
+        def joinpath(self, *parts):
+            return self.base.joinpath(*parts)
+
+    monkeypatch.setattr(versions.importlib.resources, "files", lambda _pkg: FakeFiles(directory))
+
+
+def test_write_sigs_refuses_a_non_200_response(monkeypatch, tmp_path, capsys):
+    """An error page used to be installed as the signature file.
+
+    FIDO then parsed HTML as its signature set, identified nothing, and the
+    exists() short-circuit meant re-running the update could not repair it.
+    """
+    conf_dir = tmp_path / "conf"
+    conf_dir.mkdir()
+    _fake_conf(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        versions.requests,
+        "get",
+        lambda _url, **_kwargs: DummyResponse(status_code=404, content=b"<html>not found</html>"),
+    )
+
+    with pytest.raises(SystemExit):
+        versions._write_sigs("200", "https://example.test/", "fido", "formats-v{}.xml")
+
+    assert not (conf_dir / "formats-v200.xml").exists()
+
+
+def test_write_sigs_refuses_a_200_that_is_not_signature_data(monkeypatch, tmp_path):
+    """A 200 carrying an HTML maintenance page is still not usable data."""
+    conf_dir = tmp_path / "conf"
+    conf_dir.mkdir()
+    _fake_conf(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        versions.requests,
+        "get",
+        lambda _url, **_kwargs: DummyResponse(status_code=200, content=b"not xml at all"),
+    )
+
+    with pytest.raises(ValueError):
+        versions._write_sigs("200", "https://example.test/", "fido", "formats-v{}.xml")
+
+    assert not (conf_dir / "formats-v200.xml").exists()
+    assert list(conf_dir.glob(".fido-*")) == []
+
+
+def test_write_sigs_replaces_an_existing_corrupt_file(monkeypatch, tmp_path):
+    """The exists() guard made corruption permanent, so it now checks validity."""
+    conf_dir = tmp_path / "conf"
+    conf_dir.mkdir()
+    corrupt = conf_dir / "formats-v116.xml"
+    corrupt.write_text("<html>error page</html>", encoding="utf-8")  # parses, but is not a formats file
+    _fake_conf(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        versions.requests,
+        "get",
+        lambda _url, **_kwargs: DummyResponse(status_code=200, content=b"<formats>good</formats>"),
+    )
+
+    versions._write_sigs("116", "https://example.test/", "fido", "formats-v{}.xml")
+
+    assert corrupt.read_bytes() == b"<formats>good</formats>"
+
+
+def test_every_request_passes_a_timeout(monkeypatch):
+    """requests defaults to no timeout, so a stalled server hung FIDO forever."""
+    seen = []
+
+    def record(url, **kwargs):
+        seen.append(kwargs.get("timeout"))
+        return DummyResponse(status_code=200, text='<signature version="116" />', content=b"<x/>")
+
+    monkeypatch.setattr(versions.requests, "get", record)
+
+    versions._version_check("116", "https://example.test/")
+    versions._list_available_versions("https://example.test/")
+
+    assert seen and all(timeout is not None for timeout in seen)
+
+
+def test_local_versions_write_leaves_no_temporary_behind(tmp_path):
+    """The file is written via a sibling and renamed.
+
+    Writing in place left versions.xml truncated if the write was interrupted,
+    and a truncated file was then silently treated as a fresh start.
+    """
+    versions_file = tmp_path / "versions.xml"
+    versions_file.write_text(
+        "<versions>"
+        "<pronomVersion>116</pronomVersion>"
+        "<pronomSignature>formats-v116.xml</pronomSignature>"
+        "<pronomContainerSignature>container-signature-20231127.xml</pronomContainerSignature>"
+        "<fidoExtensionSignature>format_extensions.xml</fidoExtensionSignature>"
+        "<updateScript>1.6.1</updateScript>"
+        "<updateSite>https://fidosigs.openpreservation.org</updateSite>"
+        "</versions>",
+        encoding="utf-8",
+    )
+    local = versions.LocalVersions(str(versions_file))
+
+    local.pronom_version = "117"
+    local.write()
+
+    assert "117" in versions_file.read_text(encoding="utf-8")
+    assert list(tmp_path.glob(".versions-*")) == []
+
+
+def test_local_versions_refuses_a_corrupt_file(tmp_path):
+    """A corrupt file used to yield an empty root, so every path became None."""
+    versions_file = tmp_path / "versions.xml"
+    versions_file.write_text("<versions><unclosed>", encoding="utf-8")
+
+    with pytest.raises(SystemExit):
+        versions.LocalVersions(str(versions_file))

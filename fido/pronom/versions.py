@@ -21,12 +21,18 @@ import importlib.resources
 import os
 import re
 import sys
+import tempfile
+import zipfile
 
 import requests
 from defusedxml import ElementTree as ET
 from defusedxml.ElementTree import ParseError, parse
 
 from fido import CONFIG_DIR
+
+# A server that completes the handshake and then sends nothing would otherwise
+# block forever: requests defaults to no timeout at all
+HTTP_TIMEOUT = (10, 60)
 
 
 class LocalVersions(object):
@@ -64,9 +70,13 @@ class LocalVersions(object):
         try:
             self.tree = parse(versions_file)
             self.root = self.tree.getroot()
-        except (ParseError, IOError):
+        except FileNotFoundError:
+            # No file yet is a fresh start; a corrupt one is not, and treating
+            # them alike started FIDO with every signature path set to None
             self.root = ET.Element(self.ROOT_ELEMENT)
             self.tree = ET.ElementTree(self.root)
+        except (ParseError, OSError) as err:
+            sys.exit("FIDO: {} is not readable as XML: {}".format(versions_file, err))
 
     def __getattr__(self, name):
         """Extract the element's text content."""
@@ -98,7 +108,18 @@ class LocalVersions(object):
         for key, value in self.PROPS_MAPPING.items():
             if self.root.find(value) is None:
                 raise ValueError("Field {} has not been defined!".format(key))
-        self.tree.write(self.versions_file, xml_declaration=True, method="xml", encoding="utf-8")
+        # Written via a temporary sibling: an interrupted write left
+        # versions.xml truncated, and __init__ then silently substituted an
+        # empty root rather than reporting a corrupt configuration
+        handle, temporary = tempfile.mkstemp(dir=self.conf_dir, prefix=".versions-", suffix=".part")
+        os.close(handle)
+        try:
+            self.tree.write(temporary, xml_declaration=True, method="xml", encoding="utf-8")
+            os.replace(temporary, self.versions_file)
+        except BaseException:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+            raise
 
 
 def get_local_versions(config_dir=CONFIG_DIR):
@@ -132,7 +153,7 @@ def sig_file_actions(sig_act):
 
 def _list_available_versions(update_url):
     """List available signature files."""
-    resp = requests.get(update_url + "format/")
+    resp = requests.get(update_url + "format/", timeout=HTTP_TIMEOUT)
     tree = ET.fromstring(resp.content)
     sys.stdout.write("Available signature versions:\n")
     for child in tree.iter("signature"):
@@ -158,24 +179,23 @@ def _download_sig_version(sig_act, update_url, versions):
         sys.exit(
             '{} is not a valid version number, to download a sig file try "-sig v104" or "-sig 104".'.format(sig_act)
         )
-    ver = sig_act
-    if not ver.startswith("v"):
-        ver = "v" + sig_act
-    resp = requests.get(update_url + "format/" + ver + "/")
+    ver = "v" + _get_version(sig_act)
+    resp = requests.get(update_url + "format/" + ver + "/", timeout=HTTP_TIMEOUT)
     if resp.status_code != 200:
         sys.exit("No signature files found for {}, REST status {}".format(sig_act, resp.status_code))
     _output_details(re.search(r"\d+|$", ver).group(), update_url, versions)  # noqa: W605
 
 
 def _get_version(ver_string):
-    """Parse a PROMOM version number from a string."""
-    match = re.search(r"^v?(\d+)$", ver_string, re.IGNORECASE)
+    """Parse a PRONOM version number from a string."""
+    # The regex is case insensitive, so stripping a lowercase "v" only let
+    # "V117" through intact, and int() then raised on it
+    match = None if ver_string is None else re.search(r"^v?(\d+)$", ver_string, re.IGNORECASE)
     if not match:
         sys.exit(
             '{} is not a valid version number, to download a sig file try "-sig v104" or "-sig 104".'.format(ver_string)
         )
-    ver = ver_string
-    return ver_string if not ver.startswith("v") else ver_string[1:]
+    return match.group(1)
 
 
 def _output_details(version, update_url, versions):
@@ -189,7 +209,7 @@ def _output_details(version, update_url, versions):
 
 
 def _version_check(sig_ver, update_url):
-    resp = requests.get(update_url + "format/latest/")
+    resp = requests.get(update_url + "format/latest/", timeout=HTTP_TIMEOUT)
     if resp.status_code != 200:
         sys.exit("Error getting latest version info: HTTP Status {}".format(resp.status_code))
     root_ele = ET.fromstring(resp.text)
@@ -199,7 +219,52 @@ def _version_check(sig_ver, update_url):
 
 def _write_sigs(latest, update_url, type, name_template):
     sig_out = str(importlib.resources.files("fido").joinpath("conf", name_template.format(latest)))
-    if os.path.exists(sig_out):
+    if os.path.exists(sig_out) and _is_valid_signature_file(sig_out, type):
         return
-    resp = requests.get(update_url + "format/{0}/{1}/".format(latest, type))
-    open(sig_out, "wb").write(resp.content)
+    resp = requests.get(update_url + "format/{0}/{1}/".format(latest, type), timeout=HTTP_TIMEOUT)
+    if resp.status_code != 200:
+        sys.exit(
+            "Error downloading {} signatures: HTTP Status {}".format(type, resp.status_code)
+        )
+    # Written to a sibling and renamed, so a failure leaves the working
+    # signature set in place. Installing the body unchecked meant an error page
+    # became the signature file, and the os.path.exists guard above then
+    # skipped the download forever, so the damage could not be repaired.
+    _install_atomically(sig_out, resp.content, type)
+
+
+# A maintenance page is well formed XML, so parsing is not enough: the root
+# element has to be the one this kind of signature file carries
+EXPECTED_ROOTS = {"fido": "formats", "droid": "FFSignatureFile"}
+
+
+def _is_valid_signature_file(path, kind):
+    """Return True if @param path holds something usable as @param kind data."""
+    try:
+        if os.path.getsize(path) == 0:
+            return False
+        if kind == "pronom":
+            with zipfile.ZipFile(path) as archive:
+                return archive.testzip() is None
+        root = parse(path).getroot()
+    except (ParseError, OSError, zipfile.BadZipFile):
+        return False
+    expected = EXPECTED_ROOTS.get(kind)
+    # Namespaced roots arrive as {uri}tag
+    return expected is None or root.tag.rsplit("}", 1)[-1] == expected
+
+
+def _install_atomically(destination, content, kind):
+    """Write @param content to @param destination via a temporary sibling."""
+    directory = os.path.dirname(destination)
+    handle, temporary = tempfile.mkstemp(dir=directory, prefix=".fido-", suffix=".part")
+    try:
+        with os.fdopen(handle, "wb") as out:
+            out.write(content)
+        if not _is_valid_signature_file(temporary, kind):
+            raise ValueError("downloaded data for {} is not usable".format(os.path.basename(destination)))
+        os.replace(temporary, destination)
+    except BaseException:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+        raise
