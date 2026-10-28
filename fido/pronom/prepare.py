@@ -9,7 +9,7 @@ import sys
 import zipfile
 from argparse import ArgumentParser
 from io import StringIO
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import urlopen
 from xml.dom import minidom
@@ -65,11 +65,12 @@ def prettify(elem):
 class FormatInfo:
     """Convert PRONOM formats into FIDO signatures."""
 
-    def __init__(self, pronom_files):
+    def __init__(self, pronom_files, fetch_reference_checksums=False):
         """Instantiate class, take a list of PRONOM files."""
         self.info = {}
         self.formats = []
         self.pronom_files = pronom_files
+        self.fetch_reference_checksums = fetch_reference_checksums
 
     def save(self, dst=sys.stdout):
         """Write the fido XML format definitions to @param dst."""
@@ -304,18 +305,13 @@ class FormatInfo:
                     if not urlparse(url).scheme:
                         url = "http://" + url
                     ET.SubElement(rf, "dc:identifier").text = url
-                    # And calculate the checksum of this resource:
-                    m = hashlib.md5()
-                    try:
-                        sock = urlopen(url)
-                        m.update(sock.read())
-                        sock.close()
-                    except HTTPError as http_excep:
-                        sys.stderr.write("HTTP {} error loading resource {}\n".format(http_excep.code, url))
-                        if http_excep.code == 404:
-                            continue
-
-                    checksum = m.hexdigest()
+                    # The checksum of a reference file is descriptive metadata,
+                    # so fetching it is opt-in: the URL comes from signature
+                    # data, and dereferencing it on every conversion turns an
+                    # offline build into thousands of requests to whatever host
+                    # that data names.
+                    if self.fetch_reference_checksums:
+                        checksum = reference_file_checksum(url)
                 else:
                     ET.SubElement(rf, "dc:identifier").text = (
                         get_text_tna(xml_id, "IdentifierType") + ":" + get_text_tna(xml_id, "Identifier")
@@ -385,6 +381,27 @@ def _cmp_to_key(mycmp):
             return mycmp(self.obj, other.obj) != 0
 
     return K
+
+
+def reference_file_checksum(url, timeout=30, max_bytes=16 * 1024 * 1024):
+    """
+    Return the MD5 of the resource at @param url, or "" if it cannot be read.
+
+    The URL comes from PRONOM data, so only http and https are dereferenced,
+    the read is capped, and every failure is reported rather than raised: one
+    unreachable reference file must not abandon a whole conversion run.
+    """
+    if urlparse(url).scheme not in ("http", "https"):
+        sys.stderr.write("Refusing to fetch reference file with unsupported scheme: {}\n".format(url))
+        return ""
+    digest = hashlib.md5()
+    try:
+        with urlopen(url, timeout=timeout) as sock:  # nosec B310 - scheme checked above
+            digest.update(sock.read(max_bytes))
+    except (HTTPError, URLError, OSError) as err:
+        sys.stderr.write("Error loading resource {}: {}\n".format(url, err))
+        return ""
+    return digest.hexdigest()
 
 
 def absolute_max_offset(offset, max_offset):
