@@ -23,8 +23,9 @@ import re
 import sys
 
 import requests
-from defusedxml import ElementTree as ET
+import xml.etree.ElementTree as ET
 from defusedxml.ElementTree import ParseError, parse
+from defusedxml.ElementTree import fromstring as safe_fromstring
 
 from fido import CONFIG_DIR
 
@@ -133,7 +134,7 @@ def sig_file_actions(sig_act):
 def _list_available_versions(update_url):
     """List available signature files."""
     resp = requests.get(update_url + "format/")
-    tree = ET.fromstring(resp.content)
+    tree = safe_fromstring(resp.content)
     sys.stdout.write("Available signature versions:\n")
     for child in tree.iter("signature"):
         sys.stdout.write("{}\n".format(child.get("version")))
@@ -192,7 +193,7 @@ def _version_check(sig_ver, update_url):
     resp = requests.get(update_url + "format/latest/")
     if resp.status_code != 200:
         sys.exit("Error getting latest version info: HTTP Status {}".format(resp.status_code))
-    root_ele = ET.fromstring(resp.text)
+    root_ele = safe_fromstring(resp.text)
     latest = _get_version(root_ele.get("version"))
     return int(latest) > int(sig_ver), latest
 

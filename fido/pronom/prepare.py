@@ -13,7 +13,8 @@ from urllib.parse import urlparse
 from urllib.request import urlopen
 from xml.dom import minidom
 
-from defusedxml import ElementTree as ET
+import xml.etree.ElementTree as ET
+from defusedxml.ElementTree import parse as safe_parse
 
 from fido.pronom.versions import get_local_versions
 from fido.utils.char_handler import escape
@@ -63,14 +64,11 @@ def prettify(elem):
 class FormatInfo:
     """Convert PRONOM formats into FIDO signatures."""
 
-    def __init__(self, pronom_files, format_list=None):
-        """Instantiate class, take a list of PRONOM files and an optional list of formats."""
-        format_list = format_list if format_list else []
+    def __init__(self, pronom_files):
+        """Instantiate class, take a list of PRONOM files."""
         self.info = {}
         self.formats = []
         self.pronom_files = pronom_files
-        for f in format_list:
-            self.add_format(f)  # FIXME: add_format is undefined!
 
     def save(self, dst=sys.stdout):
         """Write the fido XML format definitions to @param dst."""
@@ -176,7 +174,7 @@ class FormatInfo:
         If a @param puid is specified, only that one will be loaded.
         @return ET.ElementTree Element representing it.
         """
-        pronom_xml = ET.parse(source)
+        pronom_xml = safe_parse(source)
         pronom_root = pronom_xml.getroot()
         pronom_format = pronom_root.find(TNA("report_format_detail/FileFormat"))
         fido_format = ET.Element("format")
