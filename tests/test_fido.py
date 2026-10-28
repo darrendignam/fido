@@ -6,7 +6,6 @@ import re
 import time
 import io
 from xml.etree import ElementTree as XET
-from time import sleep
 from types import SimpleNamespace
 
 import pytest
@@ -16,11 +15,25 @@ from fido.fido import Fido
 from fido.utils.timer import PerfTimer
 
 
-def test_perf_timer():
+def test_perf_timer(monkeypatch):
+    """A controlled clock: perf_counter differences are positive without a real
+    sleep, so asserting duration > 0 could not fail."""
+    ticks = iter([10.0, 10.25])
+    monkeypatch.setattr("fido.utils.timer.perf_counter", lambda: next(ticks))
+
     timer = PerfTimer()
-    sleep(0.2)
-    duration = timer.duration()
-    assert duration > 0
+
+    assert timer.duration() == pytest.approx(0.25)
+
+
+def test_perf_timer_start_resets_the_baseline(monkeypatch):
+    ticks = iter([10.0, 20.0, 20.5])
+    monkeypatch.setattr("fido.utils.timer.perf_counter", lambda: next(ticks))
+
+    timer = PerfTimer()
+    timer.start()
+
+    assert timer.duration() == pytest.approx(0.5)
 
 
 id_test_data = [(b"\x5a\x58\x54\x61\x70\x65\x21\x1a\x01", "fmt/1000", "OK")]
@@ -110,31 +123,36 @@ def _make_fido(monkeypatch):
     return Fido(format_files=[])
 
 
-def test_container_type_detects_zip_ole_and_false(monkeypatch):
+def test_container_type_detects_every_outcome(monkeypatch):
+    """Returning "zip" for every container would otherwise go unnoticed, and
+    identify_contents would then hand a tar to walk_zip."""
     fido = _make_fido(monkeypatch)
 
-    zip_fmt = _format_element("fmt/999", container="zip")
-    ole_fmt = _format_element("fmt/111")
-    plain_fmt = _format_element("fmt/1")
-
-    assert fido.container_type([(zip_fmt, "sig")]) == "zip"
-    assert fido.container_type([(ole_fmt, "sig")]) == "ole"
-    assert fido.container_type([(plain_fmt, "sig")]) is False
+    assert fido.container_type([(_format_element("fmt/999", container="zip"), "sig")]) == "zip"
+    assert fido.container_type([(_format_element("x-fmt/265", container="tar"), "sig")]) == "tar"
+    assert fido.container_type([(_format_element("fmt/111"), "sig")]) == "ole"
+    assert fido.container_type([(_format_element("fmt/1"), "sig")]) is False
+    assert fido.container_type([]) is False
 
 
 def test_identify_contents_dispatches_supported_types(monkeypatch):
-    fido = _make_fido(monkeypatch)
-    calls = {"zip": 0, "tar": 0}
+    """Records the filename each walker received.
 
-    monkeypatch.setattr(fido, "walk_zip", lambda *_args, **_kwargs: calls.__setitem__("zip", calls["zip"] + 1))
-    monkeypatch.setattr(fido, "walk_tar", lambda *_args, **_kwargs: calls.__setitem__("tar", calls["tar"] + 1))
+    Counting which stub ran was symmetric under a swapped dispatch, so sending
+    zips to walk_tar and tars to walk_zip passed.
+    """
+    fido = _make_fido(monkeypatch)
+    calls = {}
+
+    monkeypatch.setattr(fido, "walk_zip", lambda name, *_a, **_k: calls.setdefault("zip", []).append(name))
+    monkeypatch.setattr(fido, "walk_tar", lambda name, *_a, **_k: calls.setdefault("tar", []).append(name))
 
     fido.identify_contents("a.zip", type="zip")
     fido.identify_contents("a.tar", type="tar")
     fido.identify_contents("a.bin", type="unknown")
     fido.identify_contents("a.bin", type=False)
 
-    assert calls == {"zip": 1, "tar": 1}
+    assert calls == {"zip": ["a.zip"], "tar": ["a.tar"]}
 
 
 def test_get_buffers_seekable_branches(monkeypatch):

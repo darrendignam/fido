@@ -65,3 +65,62 @@ def test_buffer_sizes_above_the_floor_are_accepted(argument):
     args = parse_cli_args([argument, "4096", "file.bin"], defaults)
 
     assert getattr(args, argument.lstrip("-")) == 4096
+
+
+def test_every_argument_has_its_documented_default():
+    """Asserts the whole Namespace.
+
+    Eight of the arguments were referenced by no test at all, so dropping
+    type=int from -bufsize, changing the -confdir default, or deleting
+    -container_bufsize or -filename outright all left the suite green.
+    """
+    args = parse_cli_args(["sample.bin"], defaults)
+
+    assert vars(args) == {
+        "files": ["sample.bin"],
+        "input": False,
+        "v": False,
+        "q": False,
+        "recurse": False,
+        "zip": False,
+        "noextension": False,
+        "nocontainer": False,
+        "pronom_only": False,
+        "filename": None,
+        "useformats": None,
+        "nouseformats": None,
+        "matchprintf": None,
+        "nomatchprintf": None,
+        "bufsize": None,
+        "sigs": None,
+        "container_bufsize": None,
+        "loadformats": None,
+        "confdir": defaults["config_dir"],
+    }
+
+
+@pytest.mark.parametrize(
+    ("argument", "value", "attribute", "expected"),
+    (
+        ("-filename", "given.bin", "filename", "given.bin"),
+        ("-useformats", "fmt/1,fmt/2", "useformats", "fmt/1,fmt/2"),
+        ("-nouseformats", "fmt/3", "nouseformats", "fmt/3"),
+        ("-matchprintf", "M %(info.puid)s", "matchprintf", "M %(info.puid)s"),
+        ("-nomatchprintf", "K %(info.filename)s", "nomatchprintf", "K %(info.filename)s"),
+        ("-sigs", "update", "sigs", "update"),
+        ("-loadformats", "a.xml,b.xml", "loadformats", "a.xml,b.xml"),
+        ("-confdir", "/somewhere", "confdir", "/somewhere"),
+    ),
+)
+def test_each_value_argument_is_carried_through(argument, value, attribute, expected):
+    args = parse_cli_args([argument, value, "sample.bin"], defaults)
+
+    assert getattr(args, attribute) == expected
+
+
+def test_an_at_prefixed_filename_is_an_ordinary_file():
+    """Response file expansion let a planted @name file supply FIDO's options,
+    including suppressing records from the output."""
+    args = parse_cli_args(["@payload"], defaults)
+
+    assert args.files == ["@payload"]

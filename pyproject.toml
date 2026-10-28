@@ -65,7 +65,10 @@ include = ["fido*"]
 "fido" = ["*.*", "conf/*.*", "pronom/*.*"]
 
 [tool.pytest.ini_options]
-addopts = "--maxfail=1 --strict-markers"
+# No --maxfail: it hid every failure after the first, so CI reported one
+# problem per full matrix run. Developers who want it pass -x.
+addopts = "--strict-markers"
+testpaths = ["tests"]
 
 
 [tool.flake8]
