@@ -4,6 +4,7 @@
 """Format Identification for Digital Objects."""
 
 import hashlib
+import re
 import sys
 import zipfile
 from argparse import ArgumentParser
@@ -125,25 +126,19 @@ class FormatInfo:
         """
         formats = []
         try:
-            pronom_collection = zipfile.ZipFile(self.pronom_files, "r")
-            for item in pronom_collection.infolist():
-                try:
-                    stream = pronom_collection.open(item)
-                    # Work is done here!
-                    format_ = self.parse_pronom_xml(stream, puid_filter)
-                    if format_ is not None:
-                        formats.append(format_)
-                finally:
-                    stream.close()
-        finally:
-            try:
-                pronom_collection.close()
-            except Exception as e:
-                print(
-                    "An error occured loading '{0}' (exception: {1})".format(self.pronom_files, e),
-                    file=sys.stderr,
-                )
-                sys.exit()
+            with zipfile.ZipFile(self.pronom_files, "r") as pronom_collection:
+                for item in pronom_collection.infolist():
+                    with pronom_collection.open(item) as stream:
+                        # Work is done here!
+                        format_ = self.parse_pronom_xml(stream, puid_filter)
+                        if format_ is not None:
+                            formats.append(format_)
+        except (OSError, zipfile.BadZipFile) as err:
+            print(
+                "An error occured loading '{0}' (exception: {1})".format(self.pronom_files, err),
+                file=sys.stderr,
+            )
+            sys.exit(1)
         # Replace the formatID with puids in has_priority_over
         if puid_filter is None:
             id_map = {}
@@ -163,9 +158,11 @@ class FormatInfo:
                             ),
                             file=sys.stderr,
                         )
+                        # A numeric ID left here is compared against PUIDs at
+                        # match time and so never fires; remove it instead
+                        element.remove(rel)
 
-        self._sort_formats(formats)
-        self.formats = formats
+        self.formats = self._sort_formats(formats)
 
     def parse_pronom_xml(self, source, puid_filter=None):
         """
@@ -225,15 +222,18 @@ class FormatInfo:
                 pos = fido_position(get_text_tna(pronom_pat, "PositionType"))
                 byte_seq = get_text_tna(pronom_pat, "ByteSequenceValue")
                 offset = get_text_tna(pronom_pat, "Offset")
-                max_offset = get_text_tna(pronom_pat, "MaxOffset")
-                if not max_offset:
-                    pass
+                max_offset = absolute_max_offset(offset, get_text_tna(pronom_pat, "MaxOffset"))
                 # print "working on puid:", puid, ", position: ", pos, "with offset, maxoffset: ", offset, ",", max_offset
                 try:
+                    if not byte_seq:
+                        raise ValueError("empty ByteSequenceValue")
                     regex = convert_to_regex(byte_seq, "Little", pos, offset, max_offset)
-                except ValueError as ve:
+                    # Compile here so an unusable pattern is caught at build
+                    # time rather than shipping and failing per scanned file
+                    re.compile(regex)
+                except (ValueError, IndexError, re.error) as err:
                     print(
-                        "ValueError converting PUID {} signature to regex: {}".format(puid, ve),
+                        "Error converting PUID {} signature to regex: {}".format(puid, err),
                         file=sys.stderr,
                     )
                     regex = FLG_INCOMPATIBLE
@@ -244,12 +244,10 @@ class FormatInfo:
                         "Error: incompatible PRONOM signature found for puid {} skipping...".format(puid),
                         file=sys.stderr,
                     )
-                    # remove the empty 'signature' nodes
-                    # now that the signature is not compatible and thus "regex" is empty
-                    remove = fido_format.findall("signature")
-                    for r in remove:
-                        fido_format.remove(r)
-                    continue
+                    # Drop only this signature; its siblings may be usable
+                    if fido_sig in list(fido_format):
+                        fido_format.remove(fido_sig)
+                    break
                 ET.SubElement(fido_pat, "position").text = pos
                 ET.SubElement(fido_pat, "pronom_pattern").text = byte_seq
                 ET.SubElement(fido_pat, "regex").text = regex
@@ -389,6 +387,19 @@ def _cmp_to_key(mycmp):
     return K
 
 
+def absolute_max_offset(offset, max_offset):
+    """
+    Return a PRONOM MaxOffset as an absolute offset.
+
+    PRONOM records MaxOffset relative to Offset: DROID matches a sequence between
+    Offset and Offset + MaxOffset, while convert_to_regex takes the absolute bound.
+    An empty or zero MaxOffset means no range and is returned unchanged.
+    """
+    if not max_offset or max_offset == "0":
+        return max_offset
+    return str(int(offset or "0") + int(max_offset))
+
+
 def fido_position(pronom_position):
     """Return BOF/EOF/VAR instead of the more verbose pronom position names."""
     if pronom_position == "Absolute from BOF":
@@ -420,7 +431,7 @@ def do_byte(chars, i, littleendian, esc=True):
     c2 = "0123456789ABCDEF".find(chars[i + 1].upper())
     buf = StringIO()
     if c1 < 0 or c2 < 0:
-        raise Exception(_convert_err_msg("bad byte sequence", chars[i : i + 2], i, chars, buf))
+        raise ValueError(_convert_err_msg("bad byte sequence", chars[i : i + 2], i, chars, buf))
     if littleendian:
         val = chr(16 * c1 + c2)
     else:
@@ -432,7 +443,7 @@ def do_byte(chars, i, littleendian, esc=True):
 
 # Python now allows regex repetitions to be max out somewhere between 4 and 4.3
 # billion, cf. https://bugs.python.org/issue13169#msg180499
-MAX_REGEX_REPS = 4e9
+MAX_REGEX_REPS = 4_000_000_000
 
 
 def calculate_repetition(char, pos, offset, maxoffset):
@@ -444,40 +455,29 @@ def calculate_repetition(char, pos, offset, maxoffset):
     calcbuf = StringIO()
 
     calcremain = False
-    offsetremain = 0
-    maxoffsetremain = 0
+    offsetremain = None
+    maxoffsetremain = None
 
     if offset is not None and int(offset) > MAX_REGEX_REPS:
         offsetremain = str(int(offset) - MAX_REGEX_REPS)
-        offset = str(int(MAX_REGEX_REPS))
+        offset = str(MAX_REGEX_REPS)
         calcremain = True
     if maxoffset is not None and int(maxoffset) > MAX_REGEX_REPS:
         maxoffsetremain = str(int(maxoffset) - MAX_REGEX_REPS)
-        maxoffset = str(int(MAX_REGEX_REPS))
+        maxoffset = str(MAX_REGEX_REPS)
         calcremain = True
 
-    if pos == "BOF" or pos == "EOF":
+    if pos in ("BOF", "EOF", "IFB", "VAR"):
         if offset != "0":
             calcbuf.write(char + "{" + str(offset))
             if maxoffset is not None:
                 calcbuf.write("," + maxoffset)
             calcbuf.write("}")
-        elif maxoffset is not None:
-            calcbuf.write(char + "{0," + maxoffset + "}")
-
-    if pos == "IFB":
-        if offset != "0":
-            calcbuf.write(char + "{" + str(offset))
-            if maxoffset is not None:
-                calcbuf.write("," + maxoffset)
-            calcbuf.write("}")
-            if maxoffset is not None:
-                calcbuf.write(",}")
         elif maxoffset is not None:
             calcbuf.write(char + "{0," + maxoffset + "}")
 
     if calcremain:  # recursion happens here
-        calcbuf.write(calculate_repetition(char, pos, offsetremain, maxoffsetremain))
+        calcbuf.write(calculate_repetition(char, pos, offsetremain or "0", maxoffsetremain))
 
     val = calcbuf.getvalue()
     calcbuf.close()
@@ -585,26 +585,37 @@ def convert_to_regex(chars, endianness="", pos="BOF", offset="0", maxoffset=""):
             i += inc
             state = "start"
         elif state == "non-match":
-            buf.write("(?!")
+            # PRONOM [!XX] is "a byte that is not XX", so the negation has to
+            # consume as many bytes as the negated sequence describes. A bare
+            # lookahead is zero width, which shifts every later offset.
+            negated = StringIO()
+            byte_count = 0
             i += 2
             while True:
                 if chars[i].isalnum():
                     (byt, inc) = do_byte(chars, i, littleendian)
-                    buf.write(byt)
+                    negated.write(byt)
+                    byte_count += 1
                     i += inc
                 elif chars[i] == "&":
                     (byt, inc) = do_all_bitmasks(chars, i, littleendian)
-                    buf.write(byt)
+                    negated.write(byt)
+                    byte_count += 1
                     i += inc
                 elif chars[i] == "~":
                     (byt, inc) = do_any_bitmasks(chars, i, littleendian)
-                    buf.write(byt)
+                    negated.write(byt)
+                    byte_count += 1
                     i += inc
                 elif chars[i] == "]":
                     break
                 else:
-                    raise Exception(_convert_err_msg("Illegal character in non-match", chars[i], i, chars, buf))
-            buf.write(")")
+                    raise ValueError(_convert_err_msg("Illegal character in non-match", chars[i], i, chars, buf))
+            sequence = negated.getvalue()
+            negated.close()
+            if byte_count == 0:
+                raise ValueError(_convert_err_msg("Empty non-match", chars[i], i, chars, buf))
+            buf.write("(?:(?!" + sequence + ")" + "." * byte_count + ")")
             i += 1
             state = "start"
 
@@ -693,9 +704,13 @@ def convert_to_regex(chars, endianness="", pos="BOF", offset="0", maxoffset=""):
             buf.write(".")
             buf.write("{")
             i += 1  # skip the (
+            digits = 0
             while True:
-                if chars[i].isalnum():
+                # Only digits: Python treats a malformed quantifier as literal
+                # text, so {2A} would silently become a literal byte demand
+                if chars[i].isdigit():
                     buf.write(chars[i])
+                    digits += 1
                     i += 1
                 elif chars[i] == "-":
                     buf.write(",")
@@ -705,7 +720,9 @@ def convert_to_regex(chars, endianness="", pos="BOF", offset="0", maxoffset=""):
                 elif chars[i] == "}":
                     break
                 else:
-                    raise Exception(_convert_err_msg("Illegal character in curly", chars[i], i, chars, buf))
+                    raise ValueError(_convert_err_msg("Illegal character in curly", chars[i], i, chars, buf))
+            if digits == 0:
+                raise ValueError(_convert_err_msg("Empty repetition", chars[i], i, chars, buf))
             buf.write("}")
             i += 1  # skip the )
             state = "start"
@@ -718,8 +735,9 @@ def convert_to_regex(chars, endianness="", pos="BOF", offset="0", maxoffset=""):
                 i += 1
             elif chars[i] == "?":
                 if chars[i + 1] != "?":
-                    raise Exception(_convert_err_msg("Illegal character after ?", chars[i + 1], i + 1, chars, buf))
-                buf.write(".?")
+                    raise ValueError(_convert_err_msg("Illegal character after ?", chars[i + 1], i + 1, chars, buf))
+                # ?? is one wildcard byte; ".?" would also match its absence
+                buf.write(".")
                 i += 2
             state = "start"
         else:
