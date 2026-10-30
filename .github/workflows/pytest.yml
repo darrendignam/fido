@@ -2,6 +2,10 @@ name: Pytest
 
 on:
   push:
+  # A pull request from a fork never triggers this repository's workflows on
+  # push, so without this the tests do not run on contributed changes at all
+  pull_request:
+    types: [opened, synchronize, reopened]
 
 jobs:
   test:

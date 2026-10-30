@@ -8,6 +8,16 @@ on:
       # tag and the package agree.
       - 'v[0-9]+.[0-9]+.[0-9]+*'
       - '[0-9]+.[0-9]+.[0-9]+*'
+  # Nothing else verified that the package still builds and installs before a
+  # tag was pushed, which is the worst moment to find out. The github-release
+  # job is gated on refs/tags, so a pull request runs the metadata checks, the
+  # build, the artefact checks and the smoke tests, and creates nothing.
+  #
+  # Enabled only once the tag-driven run had been verified end to end, so a
+  # failure here means the pull request, not the workflow. A pull request from
+  # a branch in this same repository also produces a push run of Pytest, so
+  # two runs for one push is expected.
+  pull_request:
   workflow_dispatch:
 
 permissions:
