@@ -1,0 +1,11 @@
+# Only the actions are tracked. The Python dependencies in pyproject.toml are
+# declared as floors rather than pins, so there is nothing for Dependabot to
+# raise there: pip already resolves the newest compatible release.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore(ci)

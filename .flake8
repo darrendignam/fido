@@ -1,0 +1,11 @@
+# flake8 reads setup.cfg, tox.ini or this file, never pyproject.toml, so the
+# settings live here and a bare "flake8" run locally matches CI
+[flake8]
+extend-exclude = .venv,.attic,build,dist
+extend-ignore =
+    E203,
+    E231,
+    E241,
+    E501,
+    W503
+max-line-length = 120

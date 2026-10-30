@@ -1,0 +1,20 @@
+# Deliberately small. The hooks that rewrite whole files, end-of-file-fixer and
+# trailing-whitespace, are left out because fido/conf carries several megabytes
+# of PRONOM XML that a signature update replaces wholesale, and check-xml would
+# reparse all of it on every commit.
+repos:
+-   repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+    -   id: fix-byte-order-marker
+    -   id: check-case-conflict
+    -   id: check-merge-conflict
+    -   id: check-yaml
+    -   id: check-toml
+-   repo: https://github.com/pycqa/flake8
+    rev: 7.5.0
+    hooks:
+    -   id: flake8
+        # The same scope CI lints, for the same reason: fido itself reports one
+        # F824 that has a fix of its own in flight
+        files: ^tests/
