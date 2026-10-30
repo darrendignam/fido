@@ -892,6 +892,25 @@ def test_container_recursion_stops_at_the_depth_limit(monkeypatch, capsys):
     assert "Maximum container depth" in capsys.readouterr().err
 
 
+def test_the_installed_regex_engine_takes_a_per_match_timeout():
+    """Upstream #233 is bounded by the regex module's per-match timeout, which
+    the standard library has no equivalent for.
+
+    The dependency went undeclared once, and the only test that noticed was the
+    end to end time budget, which failed 49 seconds into a run rather than
+    saying what was missing.
+    """
+    assert fido_mod.PER_MATCH_TIMEOUT_SUPPORTED, (
+        "the regex module is a hard dependency: without it a pathological "
+        "pattern cannot be interrupted mid-match"
+    )
+    assert fido_mod.REGEX_ENGINE is not re
+
+    pattern = fido_mod.REGEX_ENGINE.compile(rb"(?s)\Aab.*cd")
+
+    assert pattern.search(b"abcd", timeout=1) is not None
+
+
 @pytest.mark.parametrize(
     ("pattern", "rewritten"),
     (

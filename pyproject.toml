@@ -27,7 +27,13 @@ classifiers = [
 dependencies = [
     "olefile >= 0.46, < 1",
     "requests >= 2",
-    "defusedxml >= 0.7"
+    "defusedxml >= 0.7",
+    # The per-match timeout that bounds a pathological PRONOM pattern is the
+    # regex module's, not the standard library's. Without it a crafted file
+    # occupies identification for as long as the match takes. The floor is the
+    # oldest release verified to accept timeout as a keyword on a compiled
+    # pattern.
+    "regex >= 2022.1.18"
     ]
 
 [project.urls]
