@@ -3,6 +3,10 @@ name: Release
 on:
   push:
     tags:
+      # FIDO tags carry a v prefix: v1.4.1, v1.6.1, v2.0.0rc1. The unprefixed
+      # form is accepted too, and the version check is what decides whether a
+      # tag and the package agree.
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
       - '[0-9]+.[0-9]+.[0-9]+*'
   workflow_dispatch:
 
@@ -18,6 +22,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.version.outputs.version }}
+      normalised: ${{ steps.version.outputs.normalised }}
       prerelease: ${{ steps.version.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v7
@@ -25,29 +30,31 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      # fido/__init__.py imports nothing but os.path, so the version is readable
-      # without installing the runtime dependencies
+      - name: Install check dependencies
+        run: python -m pip install --upgrade packaging
+
       - name: Read version from package
         id: version
         run: |
+          # fido/__init__.py imports nothing but os.path, so the version is
+          # readable without installing the runtime dependencies
           version="$(python -c 'import fido; print(fido.__version__)')"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          if [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "prerelease=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          tag=()
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            tag=(--tag "$GITHUB_REF_NAME")
           fi
-          echo "Package version: $version"
+          # Written to a file rather than piped, so the step log shows the
+          # values and the default shell's lack of pipefail cannot mask a
+          # failing check
+          python .github/scripts/check_release.py version --declared "$version" "${tag[@]}" \
+            > "$RUNNER_TEMP/version.txt"
+          cat "$RUNNER_TEMP/version.txt"
+          cat "$RUNNER_TEMP/version.txt" >> "$GITHUB_OUTPUT"
 
-      # A tag that disagrees with __version__ would produce a release whose
-      # assets are all named after the other version
-      - name: Check tag matches package version
-        if: startsWith(github.ref, 'refs/tags/')
-        run: |
-          if [[ "$GITHUB_REF_NAME" != "${{ steps.version.outputs.version }}" ]]; then
-            echo "Tag $GITHUB_REF_NAME does not match package version ${{ steps.version.outputs.version }}" >&2
-            exit 1
-          fi
+      # A version reaching PyPI with nothing describing it cannot be fixed after
+      # the fact, because a version number is never reused
+      - name: Check the release notes cover this version
+        run: python .github/scripts/check_release.py notes --declared "${{ steps.version.outputs.version }}"
 
   python-packages:
     name: Python sdist and wheel
@@ -60,7 +67,7 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install build tools
-        run: python -m pip install --upgrade build twine
+        run: python -m pip install --upgrade build twine packaging
 
       - name: Build
         run: python -m build
@@ -69,27 +76,10 @@ jobs:
         run: python -m twine check dist/*
 
       # The signature data in fido/conf is shipped through package-data rather
-      # than being importable code, so a packaging mistake there produces a
-      # wheel that installs cleanly and then cannot identify anything
-      - name: Check signature data is in the wheel
-        run: |
-          wheel="$(find dist -name '*.whl' -print -quit)"
-          python - "$wheel" <<'PY'
-          import sys, zipfile
-          required = ("fido/conf/versions.xml", "fido/conf/format_extensions.xml")
-          names = set(zipfile.ZipFile(sys.argv[1]).namelist())
-          missing = [name for name in required if name not in names]
-          signatures = [n for n in names if n.startswith("fido/conf/formats-v") and n.endswith(".xml")]
-          containers = [n for n in names if n.startswith("fido/conf/container-signature-")]
-          if not signatures:
-              missing.append("fido/conf/formats-v*.xml")
-          if not containers:
-              missing.append("fido/conf/container-signature-*.xml")
-          if missing:
-              print("missing from wheel: {}".format(", ".join(missing)), file=sys.stderr)
-              raise SystemExit(1)
-          print("signature data present: {}, {}".format(signatures[0], containers[0]))
-          PY
+      # than being importable code, so a packaging mistake there produces an
+      # artefact that installs cleanly and then cannot identify anything
+      - name: Check the artefacts
+        run: python .github/scripts/check_release.py artifacts --declared "${{ needs.metadata.outputs.version }}"
 
       - uses: actions/upload-artifact@v7
         with:
@@ -98,14 +88,35 @@ jobs:
           if-no-files-found: error
 
   smoke-test:
-    name: Installed wheel (${{ matrix.os }}, Python ${{ matrix.python-version }})
+    name: Installed ${{ matrix.package }} (${{ matrix.os }}, Python ${{ matrix.python-version }})
     needs: python-packages
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
+      # Spelled out rather than crossed, because the combinations are not
+      # interchangeable: the macOS runners are arm64 and carry no Python below
+      # 3.11, and building from the sdist exercises the same pure Python result
+      # on every platform, so one run of it is enough
       matrix:
-        os: [ubuntu-24.04, macos-15, windows-2025]
-        python-version: ['3.10', '3.12']
+        include:
+          - os: ubuntu-24.04
+            python-version: '3.9'
+            package: wheel
+          - os: ubuntu-24.04
+            python-version: '3.13'
+            package: wheel
+          - os: macos-15
+            python-version: '3.13'
+            package: wheel
+          - os: windows-2025
+            python-version: '3.9'
+            package: wheel
+          - os: windows-2025
+            python-version: '3.13'
+            package: wheel
+          - os: ubuntu-24.04
+            python-version: '3.13'
+            package: sdist
     steps:
       - uses: actions/setup-python@v7
         with:
@@ -116,14 +127,19 @@ jobs:
           name: python-packages
           path: dist
 
-      # Installed from the built wheel in a clean environment, with no checkout,
-      # so nothing can be satisfied from the source tree by accident
-      - name: Install the wheel
+      # Installed from the built artefact in a clean environment, with no
+      # checkout, so nothing can be satisfied from the source tree by accident
+      - name: Install the ${{ matrix.package }}
         shell: bash
         run: |
-          wheel="$(find dist -name '*.whl' -print -quit)"
+          if [[ "${{ matrix.package }}" == "wheel" ]]; then
+            artefact="$(find dist -name '*.whl' -print -quit)"
+          else
+            artefact="$(find dist -name '*.tar.gz' -print -quit)"
+          fi
+          echo "Installing $artefact"
           python -m pip install --upgrade pip
-          python -m pip install "$wheel"
+          python -m pip install "$artefact"
 
       - name: Identify a known file
         shell: bash

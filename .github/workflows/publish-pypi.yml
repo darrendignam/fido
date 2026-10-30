@@ -2,7 +2,7 @@
 # created by release.yml is the review step for what reaches PyPI.
 #
 # Requires a PyPI trusted publisher for this repository and workflow. Until that
-# exists the job fails without uploading anything. See:
+# exists the job fails at the token exchange without uploading anything. See:
 # https://docs.pypi.org/trusted-publishers/adding-a-publisher/
 #
 # The "pypi" environment below is created automatically on first run, but an
@@ -38,7 +38,7 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install build tools
-        run: python -m pip install --upgrade build twine
+        run: python -m pip install --upgrade build twine packaging
 
       - name: Build
         run: python -m build
@@ -46,14 +46,16 @@ jobs:
       - name: Check metadata
         run: python -m twine check dist/*
 
-      # A release built from the wrong ref would upload the wrong version
-      - name: Check release tag matches package version
-        if: github.event_name == 'release'
+      # A release built from the wrong ref would upload the wrong version, and an
+      # upload cannot be replaced: PyPI never reuses a version number
+      - name: Check the release tag matches the package version
         run: |
           version="$(python -c 'import fido; print(fido.__version__)')"
-          if [[ "${{ github.event.release.tag_name }}" != "$version" ]]; then
-            echo "Release tag ${{ github.event.release.tag_name }} does not match package version $version" >&2
-            exit 1
+          tag=()
+          if [[ "${{ github.event_name }}" == "release" ]]; then
+            tag=(--tag "${{ github.event.release.tag_name }}")
           fi
+          python .github/scripts/check_release.py version --declared "$version" "${tag[@]}"
+          python .github/scripts/check_release.py artifacts --declared "$version"
 
       - uses: pypa/gh-action-pypi-publish@release/v1
