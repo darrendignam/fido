@@ -9,6 +9,13 @@ Copyright 2010 The Open Preservation Foundation
 Fido is made available under the Apache License, Version 2.0; see the file
 LICENSE.txt for details.
 
+Fido 0.0.1rc1
+-------------
+
+Not a release. This entry exists so the release workflow can be exercised end
+to end on a fork, and it is deleted along with the branch and the tag that
+carry it.
+
 Fido 2.0.0
 ----------
 
