@@ -35,9 +35,14 @@ so check this before wiring anything up:
 
 - Publishing from the upstream repository: the OPF maintainers add the trusted
   publisher to the existing `opf-fido` project.
-- Rehearsing from a fork: use TestPyPI, which is a separate index with separate
-  ownership, and add `repository-url: https://test.pypi.org/legacy/` to the
-  publish step.
+- Rehearsing from a fork: `opf-fido` is taken on TestPyPI as well, where the
+  project already holds 1.6.1, so TestPyPI is only an answer alongside a name
+  nobody has taken. Add `repository-url: https://test.pypi.org/legacy/` to the
+  publish step and register a pending publisher for that name.
+- Rehearsing no further than the build: a tag exercises everything except the
+  upload, which stops at `invalid-publisher` without sending anything. That is
+  enough to prove the trigger, the version checks, the artefacts and the draft
+  release.
 - Releasing a genuinely separate fork build: change `name` in `pyproject.toml`
   to a name nobody has taken, otherwise the upload is rejected.
 
@@ -67,15 +72,18 @@ converts into a normal publisher when the first upload creates the project.
 ### The release flow
 
 ```
-git tag 2.0.0 && git push origin 2.0.0
+git tag v2.0.0 && git push origin v2.0.0
         |
         v
   release.yml                       (triggered by the tag)
     metadata          reads fido.__version__, fails if the tag disagrees
-    python-packages   builds sdist and wheel, twine check,
-                      asserts conf/*.xml is inside the wheel
-    smoke-test        installs the wheel on Linux, macOS and Windows,
-                      across two Python versions, and identifies a GIF
+                      or if RELEASENOTES.md does not cover the version
+    python-packages   builds sdist and wheel, twine check, then checks
+                      both artefacts for the version, the signature data
+                      and shipped bytecode
+    smoke-test        installs the wheel on Linux, macOS and Windows at
+                      both ends of the supported Python range, installs
+                      the sdist on Linux, and identifies a GIF
     github-release    creates a DRAFT release carrying both artefacts
         |
         v
@@ -83,9 +91,14 @@ git tag 2.0.0 && git push origin 2.0.0
         |
         v
   publish-pypi.yml                  (triggered by release: published)
-    rebuilds, twine check, re-checks the tag against the version,
+    rebuilds, twine check, re-checks the tag and the artefacts,
     uploads via Trusted Publishing
 ```
+
+Both workflows call `.github/scripts/check_release.py` for the checks, so the
+comparison has one implementation rather than one per workflow. It is covered by
+`tests/test_check_release.py`, driven through its command line the way the
+workflows drive it.
 
 The draft release is the deliberate review gate. Nothing reaches PyPI until a
 human publishes the release, and the artefacts attached to the draft are the
@@ -93,7 +106,7 @@ ones that were tested.
 
 ### Why the extra verification steps
 
-Two checks are specific to FIDO and worth keeping.
+Four checks are worth keeping, two of them specific to FIDO.
 
 **The wheel must contain the signature data.** FIDO's PRONOM signatures live in
 `fido/conf/*.xml` and reach the wheel through `[tool.setuptools.package-data]`,
@@ -103,11 +116,22 @@ names in `versions.xml` is absent. The build job therefore opens the wheel and
 asserts that `versions.xml`, `format_extensions.xml`, a `formats-v*.xml` and a
 `container-signature-*.xml` are all present.
 
-**The installed wheel must actually identify a file.** The smoke test job runs
-with no checkout at all, installs only the built wheel, and identifies a small
-GIF, asserting the result contains `fmt/4`. Running without a checkout matters:
-with the source tree present, an import or a data file can resolve from the
-working directory and hide the packaging defect the test exists to catch.
+**The installed artefact must actually identify a file.** The smoke test job
+runs with no checkout at all, installs only the built wheel or sdist, and
+identifies a small GIF, asserting the result contains `fmt/4`. Running without a
+checkout matters: with the source tree present, an import or a data file can
+resolve from the working directory and hide the packaging defect the test exists
+to catch.
+
+**No artefact may ship bytecode.** The packaging globs once matched `*.*`, which
+swept `__pycache__` into both artefacts, so a `py3-none-any` wheel carried
+CPython 3.12 bytecode, some of it for modules that had since moved. The check
+rejects any `.pyc`, `.pyo` or `__pycache__` member.
+
+**The release notes must cover the version.** This runs before anything is
+built, because a version number is never reused once uploaded: a release nobody
+documented cannot be fixed by replacing it. A prerelease is accepted against the
+heading of the release it leads to, so `2.0.0rc1` is covered by `Fido 2.0.0`.
 
 ### Version and tag discipline
 
@@ -116,12 +140,25 @@ The version has one source, `__version__` in `fido/__init__.py`, which
 if the git tag does not match it, so the tag, the metadata and the artefact
 filenames cannot disagree.
 
-Note that PyPI normalises versions per PEP 440. The current `2.0.0-dev` becomes
-`2.0.0.dev0` in artefact filenames and on the index, and `pip install opf-fido`
-will not select a development release unless `--pre` is passed. Tag a final
-release as `2.0.0`, and set `__version__` to match, when the intent is a release
-users install by default. The `metadata` job marks anything that is not exactly
-`N.N.N` as a prerelease on the GitHub release.
+Two details make that comparison less obvious than it looks.
+
+**Tags carry a `v` prefix and versions do not.** Every FIDO tag is `v`-prefixed,
+`v1.4.1` through `v2.0.0rc1`, and the prefix is not part of the version. The
+workflow accepts tags with or without it and strips it before comparing.
+
+**PyPI normalises versions per PEP 440.** The current `2.0.0-dev` becomes
+`2.0.0.dev0` in artefact filenames, in the metadata and on the index, so
+comparing the raw strings would reject a build's own artefacts. Comparison is by
+PEP 440 equality, and the prerelease flag on the GitHub release comes from the
+version itself rather than from a pattern match on its text.
+
+`pip install opf-fido` will not select a development release unless `--pre` is
+passed. Tag a final release as `v2.0.0`, and set `__version__` to `2.0.0`, when
+the intent is a release users install by default.
+
+Note that a version has to be a PEP 440 version. A throwaway tag like
+`0.0.1-test` reads sensibly and is not a version at all: `python -m build`
+refuses it. Use `0.0.1rc1`.
 
 ### Rehearsing without risk
 
@@ -146,8 +183,8 @@ explicitly.
 
 - [ ] `__version__` in `fido/__init__.py` is the version being released
 - [ ] `RELEASENOTES.md` has an entry for it
-- [ ] The test suite passes on the supported Python versions
-- [ ] `git tag <version>` matches `__version__` exactly, then push the tag
+- [ ] The test suite passes across the matrix, Python 3.9 to 3.13
+- [ ] `git tag v<version>` agrees with `__version__`, then push the tag
 - [ ] `release.yml` is green, including the smoke test on all three platforms
 - [ ] The draft release carries both the sdist and the wheel
 - [ ] Release notes written, then publish the release
