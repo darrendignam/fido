@@ -1,1 +1,7 @@
-recursive-include fido *.*
+# The PRONOM signatures and their schemas are data, not importable code. A
+# bare "recursive-include fido *.*" swept up __pycache__ as well, and
+# include-package-data then carried it into the wheel.
+recursive-include fido/conf *.xml *.xsd *.zip
+
+global-exclude *.py[cod]
+global-exclude __pycache__/*

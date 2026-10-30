@@ -70,7 +70,10 @@ version = { attr = "fido.__version__" }
 include = ["fido*"]
 
 [tool.setuptools.package-data]
-"fido" = ["*.*", "conf/*.*", "pronom/*.*"]
+# Listed by extension rather than as *.*, which matched __pycache__ entries and
+# shipped bytecode for modules that had since moved to fido.utils and
+# fido.pronom
+"fido" = ["conf/*.xml", "conf/*.xsd", "conf/*.zip"]
 
 [tool.pytest.ini_options]
 # No --maxfail: it hid every failure after the first, so CI reported one
